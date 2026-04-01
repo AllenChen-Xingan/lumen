@@ -373,7 +373,7 @@ impl Database {
         if folder_type == "manual" {
             let count = self.count_manual_folders()?;
             if count >= 4 {
-                return Err(rusqlite::Error::ModuleError(
+                return Err(rusqlite::Error::InvalidParameterName(
                     "Maximum of 4 manual folders allowed".to_string(),
                 ));
             }
