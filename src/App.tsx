@@ -104,8 +104,8 @@ export default function App() {
     if (!url) return;
     setStatus("Adding feed...");
     try {
-      const result = await invoke<{ feed: Feed; article_count: number }>("add_feed", { url });
-      setStatus(`Added: ${result.feed.title} (${result.article_count} articles)`);
+      const result = await invoke<{ feed_id: number; title: string; url: string; article_count: number }>("add_feed", { url });
+      setStatus(`Added: ${result.title} (${result.article_count} articles)`);
       setFeedUrl("");
       setShowAddFeed(false);
       await loadFeeds();
@@ -156,8 +156,9 @@ export default function App() {
   const fetchAll = async () => {
     setStatus("Fetching...");
     try {
-      const results = await invoke<string[]>("fetch_feeds");
-      setStatus(results.join("; "));
+      const results = await invoke<Array<{ feed_id: number; title: string; new_articles: number; error?: string }>>("fetch_feeds");
+      const statusText = results.map(r => r.error ? `${r.title}: ${r.error}` : `${r.title}: ${r.new_articles} new`).join("; ");
+      setStatus(statusText);
       setLastRefreshTime(Date.now());
       updateRefreshLabel();
       const fid = selectedFeed();
@@ -192,8 +193,12 @@ export default function App() {
       const data = await file.text();
       setStatus("Importing...");
       try {
-        const results = await invoke<string[]>("import_opml", { data });
-        setStatus(results.join("; "));
+        const results = await invoke<{ imported: Array<{title: string}>; errors: Array<{title: string; error: string}>; imported_count: number }>("import_opml", { data });
+        const msgs = [
+          ...results.imported.map(i => `Imported: ${i.title}`),
+          ...results.errors.map(e => `Error: ${e.title} - ${e.error}`),
+        ];
+        setStatus(msgs.join("; ") || `Imported ${results.imported_count} feeds`);
         await loadFeeds();
       } catch (e) {
         setStatus(`Error: ${e}`);

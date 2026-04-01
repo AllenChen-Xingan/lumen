@@ -1,165 +1,227 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use rss_core::{Feed, Article};
-use rss_core::parser::parse_feed;
-use rss_core::opml;
-use rss_fetch::fetch_feed_bytes;
-use rss_store::Database;
-use serde::Serialize;
-use std::sync::Mutex;
-use tauri::State;
+use serde::{Deserialize, Serialize};
 
-struct AppState {
-    db: Mutex<Database>,
+// ── Data structs (local, no rss-core dependency) ──────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Feed {
+    pub id: i64,
+    pub title: String,
+    pub url: String,
+    pub site_url: String,
+    pub description: String,
+    pub added_at: String,
 }
 
-#[derive(Serialize)]
-struct FeedResult {
-    feed: Feed,
-    article_count: usize,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Article {
+    pub id: i64,
+    pub feed_id: i64,
+    pub title: String,
+    pub url: String,
+    pub content: String,
+    pub summary: String,
+    pub published_at: String,
+    pub is_read: bool,
+    pub is_starred: bool,
+    pub fetched_at: String,
 }
 
-#[tauri::command]
-fn list_feeds(state: State<AppState>) -> Result<Vec<Feed>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.list_feeds().map_err(|e| e.to_string())
+#[derive(Serialize, Clone, Debug)]
+pub struct FeedResult {
+    pub feed_id: i64,
+    pub title: String,
+    pub url: String,
+    pub article_count: usize,
 }
 
-#[tauri::command]
-fn add_feed(url: String, state: State<AppState>) -> Result<FeedResult, String> {
-    let bytes = fetch_feed_bytes(&url).map_err(|e| e.to_string())?;
-    let (feed, articles) = parse_feed(&url, &bytes).map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let feed_id = db.add_feed(&feed).map_err(|e| e.to_string())?;
-    let count = db.add_articles(feed_id, &articles).unwrap_or(0);
-    let mut saved_feed = feed;
-    saved_feed.id = feed_id;
-    Ok(FeedResult { feed: saved_feed, article_count: count })
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FetchResult {
+    pub feed_id: i64,
+    pub title: String,
+    pub new_articles: usize,
+    pub error: Option<String>,
 }
 
-#[tauri::command]
-fn remove_feed(id: i64, state: State<AppState>) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.remove_feed(id).map_err(|e| e.to_string())
-}
+// ── CLI helpers ───────────────────────────────────────────────────────────
 
-#[tauri::command]
-fn fetch_feeds(state: State<AppState>) -> Result<Vec<String>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let feeds = db.list_feeds().map_err(|e| e.to_string())?;
-    let mut results = Vec::new();
-    for feed in &feeds {
-        match fetch_feed_bytes(&feed.url) {
-            Ok(bytes) => match parse_feed(&feed.url, &bytes) {
-                Ok((_, articles)) => {
-                    let count = db.add_articles(feed.id, &articles).unwrap_or(0);
-                    results.push(format!("{}: {} new", feed.title, count));
-                }
-                Err(e) => results.push(format!("{}: parse error: {}", feed.title, e)),
-            },
-            Err(e) => results.push(format!("{}: fetch error: {}", feed.title, e)),
-        }
+fn cli_path() -> String {
+    let exe = std::env::current_exe().unwrap();
+    let dir = exe.parent().unwrap();
+    let cli = dir.join("rss-cli");
+    if cli.exists() {
+        return cli.to_string_lossy().to_string();
     }
+    let cli_exe = dir.join("rss-cli.exe");
+    if cli_exe.exists() {
+        return cli_exe.to_string_lossy().to_string();
+    }
+    "rss-cli".to_string()
+}
+
+fn cli(args: &[&str]) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new(cli_path())
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run rss-cli: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("Invalid CLI output: {} — raw: {}", e, stdout))?;
+    if envelope["ok"].as_bool() == Some(true) {
+        Ok(envelope["result"].clone())
+    } else {
+        Err(envelope["error"]
+            .as_str()
+            .unwrap_or("Unknown error")
+            .to_string())
+    }
+}
+
+// ── Tauri commands ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_feeds() -> Result<Vec<Feed>, String> {
+    let result = cli(&["list"])?;
+    let feeds: Vec<Feed> = serde_json::from_value(result["feeds"].clone())
+        .map_err(|e| format!("Failed to parse feeds: {}", e))?;
+    Ok(feeds)
+}
+
+#[tauri::command]
+fn add_feed(url: String) -> Result<FeedResult, String> {
+    let result = cli(&["add", &url])?;
+    let feed_id = result["feed_id"]
+        .as_i64()
+        .ok_or("Missing feed_id")?;
+    let title = result["title"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let feed_url = result["url"]
+        .as_str()
+        .unwrap_or(&url)
+        .to_string();
+    let article_count = result["articles_added"]
+        .as_u64()
+        .unwrap_or(0) as usize;
+    Ok(FeedResult {
+        feed_id,
+        title,
+        url: feed_url,
+        article_count,
+    })
+}
+
+#[tauri::command]
+fn remove_feed(id: i64) -> Result<bool, String> {
+    cli(&["remove", &id.to_string()])?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn fetch_feeds() -> Result<Vec<FetchResult>, String> {
+    let result = cli(&["fetch"])?;
+    let results: Vec<FetchResult> = serde_json::from_value(result["results"].clone())
+        .map_err(|e| format!("Failed to parse fetch results: {}", e))?;
     Ok(results)
 }
 
 #[tauri::command]
-fn list_articles(feed_id: Option<i64>, unread_only: bool, state: State<AppState>) -> Result<Vec<Article>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.list_articles(feed_id, unread_only).map_err(|e| e.to_string())
+fn list_articles(feed_id: Option<i64>, unread_only: bool) -> Result<Vec<Article>, String> {
+    let mut args: Vec<&str> = vec!["articles", "--count", "9999"];
+    let id_str;
+    if let Some(id) = feed_id {
+        id_str = id.to_string();
+        args.push("--feed");
+        args.push(&id_str);
+    }
+    if unread_only {
+        args.push("--unread");
+    }
+    let result = cli(&args)?;
+    let articles: Vec<Article> = serde_json::from_value(result["articles"].clone())
+        .map_err(|e| format!("Failed to parse articles: {}", e))?;
+    Ok(articles)
 }
 
 #[tauri::command]
-fn mark_read(id: i64, state: State<AppState>) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.mark_read(id).map_err(|e| e.to_string())
+fn mark_read(id: i64) -> Result<bool, String> {
+    cli(&["mark-read", &id.to_string()])?;
+    Ok(true)
 }
 
 #[tauri::command]
-fn toggle_star(id: i64, state: State<AppState>) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.toggle_star(id).map_err(|e| e.to_string())
+fn toggle_star(id: i64) -> Result<bool, String> {
+    cli(&["star", &id.to_string()])?;
+    Ok(true)
 }
 
 #[tauri::command]
-fn import_opml(data: String, state: State<AppState>) -> Result<Vec<String>, String> {
-    let opml_feeds = opml::parse_opml(&data).map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let mut results = Vec::new();
-    for opml_feed in &opml_feeds {
-        match fetch_feed_bytes(&opml_feed.xml_url) {
-            Ok(bytes) => match parse_feed(&opml_feed.xml_url, &bytes) {
-                Ok((feed, articles)) => {
-                    match db.add_feed(&feed) {
-                        Ok(feed_id) => {
-                            let count = db.add_articles(feed_id, &articles).unwrap_or(0);
-                            results.push(format!("Imported: {} ({} articles)", feed.title, count));
-                        }
-                        Err(e) => results.push(format!("Skip {}: {}", opml_feed.title, e)),
-                    }
-                }
-                Err(e) => results.push(format!("Parse error {}: {}", opml_feed.title, e)),
-            },
-            Err(e) => results.push(format!("Fetch error {}: {}", opml_feed.title, e)),
+fn search_articles(query: String) -> Result<Vec<Article>, String> {
+    let result = cli(&["search", &query, "--count", "9999"])?;
+    let articles: Vec<Article> = serde_json::from_value(result["articles"].clone())
+        .map_err(|e| format!("Failed to parse articles: {}", e))?;
+    Ok(articles)
+}
+
+#[tauri::command]
+fn fetch_full_text(id: i64) -> Result<String, String> {
+    let result = cli(&["fetch-full-text", &id.to_string()])?;
+    result["html"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Missing html in result".to_string())
+}
+
+#[tauri::command]
+fn import_opml(data: String) -> Result<Vec<String>, String> {
+    // Write OPML data to a temp file so the CLI can read it
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join(format!("rss-import-{}.opml", std::process::id()));
+    std::fs::write(&tmp_path, &data)
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+    let path_str = tmp_path.to_string_lossy().to_string();
+    let result = cli(&["import", &path_str]);
+
+    // Clean up temp file regardless of outcome
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let result = result?;
+
+    let mut status: Vec<String> = Vec::new();
+    if let Some(imported) = result["imported"].as_array() {
+        for item in imported {
+            if let Some(s) = item.as_str() {
+                status.push(s.to_string());
+            }
         }
     }
-    Ok(results)
-}
-
-#[tauri::command]
-fn export_opml(state: State<AppState>) -> Result<String, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let feeds = db.list_feeds().map_err(|e| e.to_string())?;
-    let pairs: Vec<(String, String)> = feeds.into_iter().map(|f| (f.title, f.url)).collect();
-    Ok(opml::generate_opml(&pairs))
-}
-
-#[tauri::command]
-fn fetch_full_text(id: i64, state: State<AppState>) -> Result<String, String> {
-    // Check cache first
-    let url = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        if let Some(cached) = db.get_full_content(id).map_err(|e| e.to_string())? {
-            return Ok(cached);
+    if let Some(errors) = result["errors"].as_array() {
+        for item in errors {
+            if let Some(s) = item.as_str() {
+                status.push(s.to_string());
+            }
         }
-        db.get_article_url(id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Article has no URL".to_string())?
-    };
-    // DB lock released
-
-    // Run extraction
-    let result = rss_extract::extract_full_text(&url)
-        .map_err(|e| format!("Extraction failed: {}", e))?;
-
-    // Cache result
-    {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.set_full_content(id, &result.html).map_err(|e| e.to_string())?;
     }
-
-    Ok(result.html)
+    Ok(status)
 }
 
 #[tauri::command]
-fn search_articles(query: String, state: State<AppState>) -> Result<Vec<Article>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.search_articles(&query).map_err(|e| e.to_string())
+fn export_opml() -> Result<String, String> {
+    let result = cli(&["export"])?;
+    result["opml"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Missing opml in result".to_string())
 }
+
+// ── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
-    let db_path = {
-        let dir = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        let app_dir = dir.join("rss-reader");
-        std::fs::create_dir_all(&app_dir).ok();
-        app_dir.join("feeds.db").to_string_lossy().to_string()
-    };
-
-    let db = Database::open(&db_path).expect("Failed to open database");
-
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(AppState { db: Mutex::new(db) })
         .invoke_handler(tauri::generate_handler![
             list_feeds,
             add_feed,
