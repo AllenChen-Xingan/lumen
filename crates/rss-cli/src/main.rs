@@ -128,6 +128,12 @@ enum FolderAction {
         /// Comma-separated indices to reject (e.g. "0,2"), or omit to reject all
         indices: Option<String>,
     },
+    /// Reset all smart folders — delete, record reason, re-suggest
+    Reset {
+        /// Why are you resetting? (stored for future suggestions)
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,6 +1100,34 @@ fn main() -> ExitCode {
                         }
                         Err(e) => error("folders", &format!("{}", e), "Check database"),
                     }
+                }
+                Some(FolderAction::Reset { reason }) => {
+                    // 1. Delete all smart folders + store reason
+                    let deleted = db.reset_smart_folders(&reason).unwrap_or(0);
+
+                    // 2. Re-suggest immediately
+                    let new_suggestions = db.suggest_smart_folders(4).unwrap_or_default();
+                    let items: Vec<Value> = new_suggestions.iter().enumerate()
+                        .map(|(i, (name, related, count, query))| json!({
+                            "index": i,
+                            "name": name,
+                            "related_entities": related,
+                            "article_count": count,
+                            "query": query,
+                        }))
+                        .collect();
+
+                    success("folders", json!({
+                        "action": "reset",
+                        "deleted": deleted,
+                        "reason": reason,
+                        "new_suggestions": items,
+                        "suggestion_count": items.len(),
+                        "action_required": "Review new suggestions, then accept or reset again.",
+                    }), vec![
+                        action("rss folders accept", "Accept new suggestions", json!({})),
+                        action("rss folders reset --reason \"...\"", "Reset again with new feedback", json!({})),
+                    ])
                 }
             }
         }
