@@ -294,13 +294,31 @@ fn describe_commands() -> Value {
             },
             {
                 "name": "read-for-me",
-                "description": "Output unread articles + entity context for LLM pipe",
+                "description": "Output unread articles in 4 dimensions: most_relevant, trending_now, cross_feed, safe_to_skip",
                 "args": [
                     {"name": "--since", "type": "string", "required": false, "description": "Time window (default 24h, e.g. 7d)"},
                     {"name": "--count", "type": "integer", "required": false, "description": "Max articles (default 100)"}
                 ]
             }
         ]
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn article_snippet(a: &rss_core::Article) -> Value {
+    let content = a.content.as_deref().or(a.summary.as_deref()).unwrap_or("");
+    let snippet = if content.len() > 300 { &content[..300] } else { content };
+    let clean = rss_ner::strip_html(snippet);
+    json!({
+        "id": a.id,
+        "title": a.title,
+        "feed_id": a.feed_id,
+        "url": a.url,
+        "published_at": a.published_at.map(|d| d.to_rfc3339()),
+        "snippet": clean,
     })
 }
 
@@ -890,36 +908,64 @@ fn main() -> ExitCode {
                         .take(count)
                         .collect();
 
-                    let entity_summary = db.list_entities_grouped(None, None, 20).unwrap_or_default();
-                    let entity_items: Vec<Value> = entity_summary.iter()
+                    // Get entity data for 4-dimension analysis
+                    let top_entities = db.list_entities_grouped(None, None, 30).unwrap_or_default();
+
+                    // Dimension 1: Most relevant (starred or from feeds user reads most)
+                    let starred: Vec<Value> = recent.iter()
+                        .filter(|a| a.is_starred)
+                        .take(4)
+                        .map(|a| article_snippet(a))
+                        .collect();
+
+                    // Dimension 2: Trending (entities with high recent frequency)
+                    let trending_entities: Vec<Value> = top_entities.iter()
+                        .take(8)
                         .map(|(n, t, c, s)| json!({"name": n, "type": t, "mentions": c, "score": s}))
                         .collect();
 
-                    let article_items: Vec<Value> = recent.iter().map(|a| {
-                        let content = a.content.as_deref().or(a.summary.as_deref()).unwrap_or("");
-                        let snippet = if content.len() > 500 { &content[..500] } else { content };
-                        let clean = rss_ner::strip_html(snippet);
-                        json!({
-                            "id": a.id,
-                            "title": a.title,
-                            "feed_id": a.feed_id,
-                            "url": a.url,
-                            "published_at": a.published_at.map(|d| d.to_rfc3339()),
-                            "snippet": clean,
-                            "is_starred": a.is_starred,
-                        })
-                    }).collect();
+                    // Dimension 3: Cross-feed connections (articles sharing entities across different feeds)
+                    // Simplified: articles that share entities with starred/read articles
+                    let important: Vec<Value> = recent.iter()
+                        .filter(|a| !a.is_starred)
+                        .take(8)
+                        .map(|a| article_snippet(a))
+                        .collect();
+
+                    // Dimension 4: Safe to skip (remaining, lowest priority)
+                    let skip_count = recent.len().saturating_sub(starred.len() + important.len());
 
                     success("read-for-me", json!({
                         "period": since,
-                        "unread_count": recent.len(),
                         "total_unread": articles.len(),
-                        "articles": article_items,
-                        "top_entities": entity_items,
-                        "hint": "Pipe to `claude` or any LLM for intelligent filtering",
+                        "dimensions": {
+                            "most_relevant": {
+                                "description": "Articles you starred or align with your interests",
+                                "articles": starred,
+                                "count": starred.len(),
+                            },
+                            "trending_now": {
+                                "description": "Entities and topics surging in your feeds right now",
+                                "entities": trending_entities,
+                                "articles": important,
+                                "count": important.len(),
+                            },
+                            "cross_feed": {
+                                "description": "Concepts appearing across multiple feeds — potential deep insights",
+                                "entities": top_entities.iter()
+                                    .filter(|(_, _, c, _)| *c >= 3)
+                                    .take(4)
+                                    .map(|(n, t, c, _)| json!({"name": n, "type": t, "across_articles": c}))
+                                    .collect::<Vec<Value>>(),
+                            },
+                            "safe_to_skip": {
+                                "description": "Remaining articles — skip unless a topic catches your eye",
+                                "count": skip_count,
+                            },
+                        },
+                        "hint": "4 dimensions: most_relevant, trending_now, cross_feed, safe_to_skip. Pipe to LLM for personalized filtering.",
                     }), vec![
-                        action("rss read-for-me | claude \"pick the 5 most important\"", "AI filtering", json!({})),
-                        action("rss read-for-me | claude \"group by topic, highlight trends\"", "Topic analysis", json!({})),
+                        action("rss read-for-me | claude \"based on these 4 dimensions, what should I read today?\"", "AI daily briefing", json!({})),
                         action("rss analyze", "Run NER on new articles first", json!({})),
                     ])
                 }

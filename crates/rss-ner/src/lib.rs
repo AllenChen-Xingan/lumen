@@ -7,9 +7,17 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize)]
 pub struct Entity {
     pub name: String,
-    pub entity_type: String, // "person", "organization", "location", "concept", "topic"
+    pub entity_type: String, // one of DEFAULT_ENTITY_TYPES
     pub score: f32,
 }
+
+/// 可约束的复杂: max 4 types matching human working memory capacity
+pub const DEFAULT_ENTITY_TYPES: &[&str] = &[
+    "person",        // 人物
+    "organization",  // 组织/公司
+    "concept",       // 概念/技术/主题 (merged)
+    "event",         // 事件 (person+org+time intersection)
+];
 
 // ── Model Management ──
 
@@ -148,8 +156,8 @@ fn label_to_type(label: &str) -> Option<&'static str> {
     match label {
         "B-PER" | "I-PER" => Some("person"),
         "B-ORG" | "I-ORG" => Some("organization"),
-        "B-LOC" | "I-LOC" => Some("location"),
-        "B-MISC" | "I-MISC" => Some("misc"),
+        "B-LOC" | "I-LOC" => None, // location demoted to attribute, not top-level
+        "B-MISC" | "I-MISC" => Some("event"), // MISC often captures events
         _ => None,
     }
 }
@@ -235,14 +243,12 @@ fn ner_extract(text: &str) -> Result<Vec<Entity>, Box<dyn std::error::Error>> {
                     });
                 }
             }
-            // Start new entity
-            let (start, end) = offsets[i];
-            let token_text = &text[start..end.min(text.len())];
-            current_entity = Some((
-                token_text.to_string(),
-                label_to_type(label).unwrap_or("misc"),
-                best_prob,
-            ));
+            // Start new entity (skip unmapped labels like LOC)
+            if let Some(etype) = label_to_type(label) {
+                let (start, end) = offsets[i];
+                let token_text = &text[start..end.min(text.len())];
+                current_entity = Some((token_text.to_string(), etype, best_prob));
+            }
         } else if label.starts_with("I-") {
             // Continue entity
             if let Some((ref mut name, _, ref mut score)) = current_entity {
@@ -337,7 +343,7 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
 
     let mut all = Vec::new();
 
-    // NER entities (person, org, location)
+    // NER entities (person, org, event)
     if let Ok(ner_entities) = ner_extract(truncated) {
         all.extend(ner_entities);
     }
@@ -346,5 +352,15 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
     let keywords = rake_extract(truncated, 10);
     all.extend(keywords);
 
-    all
+    // Dedup across NER + RAKE: group by lowercase name, keep highest score
+    let mut deduped: HashMap<String, Entity> = HashMap::new();
+    for e in all {
+        let key = e.name.to_lowercase();
+        let entry = deduped.entry(key).or_insert(e.clone());
+        if e.score > entry.score {
+            *entry = e;
+        }
+    }
+
+    deduped.into_values().collect()
 }
