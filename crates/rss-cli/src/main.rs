@@ -83,6 +83,14 @@ enum Commands {
         #[command(subcommand)]
         action: Option<FolderAction>,
     },
+    /// Move a feed to a folder (or uncategorize it)
+    MoveFeed {
+        /// Feed ID to move
+        feed_id: i64,
+        /// Folder ID (omit to uncategorize)
+        #[arg(long)]
+        folder: Option<i64>,
+    },
     /// Output unread articles + entity context for LLM pipe
     ReadForMe {
         #[arg(long, default_value = "24h")]
@@ -304,6 +312,14 @@ fn describe_commands() -> Value {
                 "name": "folders",
                 "description": "Manage folders: list, suggest (AI), accept, create, remove, articles",
                 "args": []
+            },
+            {
+                "name": "move-feed",
+                "description": "Move a feed to a folder (or uncategorize it)",
+                "args": [
+                    {"name": "feed_id", "type": "integer", "required": true, "description": "Feed ID to move"},
+                    {"name": "--folder", "type": "integer", "required": false, "description": "Folder ID (omit to uncategorize)"}
+                ]
             },
             {
                 "name": "read-for-me",
@@ -1079,6 +1095,21 @@ fn main() -> ExitCode {
                         Err(e) => error("folders", &format!("{}", e), "Check database"),
                     }
                 }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // MOVE-FEED
+        // ---------------------------------------------------------------
+        Commands::MoveFeed { feed_id, folder } => {
+            match db.move_feed_to_folder(feed_id, folder) {
+                Ok(true) => success("feeds", json!({
+                    "action": "move",
+                    "feed_id": feed_id,
+                    "folder_id": folder,
+                }), vec![]),
+                Ok(false) => error("feeds", "Feed not found", "Check feed ID"),
+                Err(e) => error("feeds", &format!("{}", e), "Check IDs"),
             }
         }
 
