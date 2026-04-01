@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:paulgraham.com)",
+      "Bash(cargo check:*)",
+      "Bash(./target/debug/rss-cli.exe --help)",
+      "Bash(./target/debug/rss-cli.exe list:*)",
+      "Bash(cargo build:*)",
+      "Bash(bash tests/e2e.sh)",
+      "Bash(cargo install:*)",
+      "Bash(pnpm build:*)",
+      "Bash(bash scripts/verify.sh)",
+      "Bash(cargo test:*)",
+      "Bash(bash scripts/align.sh)",
+      "Bash(tasklist)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm approve-builds:*)",
+      "Bash(bash tests/nvda-checklist.sh)",
+      "Bash(pnpm tau)",
+      "Bash(powershell:*)",
+      "Bash(cargo run:*)",
+      "Bash(npx tsc:*)",
+      "Bash(RSS_DB_PATH=\"target/test_e2e.db\" cargo run -p rss-cli)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d['ok'], d.get\\('result',{}\\).get\\('title',''\\), d.get\\('result',{}\\).get\\('articles_added',''\\), d.get\\('error',''\\)\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d['ok'], d.get\\('result',{}\\).get\\('title',''\\), d.get\\('result',{}\\).get\\('articles_added',''\\), d.get\\('error',''\\)[:80] if not d['ok'] else ''\\)\")",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -s \"https://crates.io/api/v1/crates/tokenizers\")",
+      "Bash(python -m json.tool)",
+      "Bash(python -c ':*)"
+    ]
+  }
+}

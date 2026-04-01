@@ -41,6 +41,12 @@ enum Commands {
         unread: bool,
         #[arg(long, default_value_t = 30)]
         count: usize,
+        /// Compact output: id, title, source, published_at, tldr, tags, url (no content)
+        #[arg(long)]
+        compact: bool,
+        /// Output one JSON object per line (for piping/grep)
+        #[arg(long)]
+        json_lines: bool,
     },
     /// Read an article by ID (marks it read)
     Read { id: i64 },
@@ -57,6 +63,12 @@ enum Commands {
         query: String,
         #[arg(long, default_value_t = 30)]
         count: usize,
+        /// Time filter: "24h", "7d", "30d"
+        #[arg(long)]
+        since: Option<String>,
+        /// Compact output (no content)
+        #[arg(long)]
+        compact: bool,
     },
     /// Fetch full-text content for an article (cached)
     FetchFullText { id: i64 },
@@ -68,6 +80,9 @@ enum Commands {
         #[arg(long)]
         download_model: bool,
     },
+    /// Internal: generate tldr for articles that don't have one
+    #[command(name = "_summarize", hide = true)]
+    Summarize,
     /// Internal: query extracted entities
     #[command(name = "_entities", hide = true)]
     Entities {
@@ -247,7 +262,9 @@ fn describe_commands() -> Value {
                 "args": [
                     {"name": "--feed", "type": "integer", "required": false, "description": "Filter by feed ID"},
                     {"name": "--unread", "type": "boolean", "required": false, "description": "Only unread articles"},
-                    {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"}
+                    {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"},
+                    {"name": "--compact", "type": "boolean", "required": false, "description": "Agent-friendly compact output (no content)"},
+                    {"name": "--json-lines", "type": "boolean", "required": false, "description": "One JSON per line (for piping)"}
                 ]
             },
             {
@@ -288,7 +305,9 @@ fn describe_commands() -> Value {
                 "description": "Full-text search across articles (default: first 30)",
                 "args": [
                     {"name": "query", "type": "string", "required": true, "description": "Search query"},
-                    {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"}
+                    {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"},
+                    {"name": "--since", "type": "string", "required": false, "description": "Time filter: 24h, 7d, 30d"},
+                    {"name": "--compact", "type": "boolean", "required": false, "description": "Agent-friendly compact output"}
                 ]
             },
             {
@@ -356,6 +375,81 @@ fn article_snippet(a: &rss_core::Article) -> Value {
         "url": a.url,
         "published_at": a.published_at.map(|d| d.to_rfc3339()),
         "snippet": clean,
+        "tldr": a.tldr,
+    })
+}
+
+/// Generate a tldr from article text: extract first meaningful sentence, cap at 150 chars.
+fn generate_tldr(article: &rss_core::Article) -> Option<String> {
+    let raw = article.full_content.as_deref()
+        .or(article.content.as_deref())
+        .or(article.summary.as_deref())
+        .unwrap_or(&article.title);
+
+    // Strip HTML and take first 500 chars
+    let clean = rss_ner::strip_html(raw);
+    let text = clean.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let truncated = if text.len() > 500 { &text[..500] } else { text };
+
+    // Find first sentence boundary
+    let sentence = extract_first_sentence(truncated);
+    let result = if sentence.len() > 150 {
+        format!("{}...", &sentence[..147])
+    } else {
+        sentence
+    };
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Extract first meaningful sentence from text
+fn extract_first_sentence(text: &str) -> String {
+    // Skip leading whitespace/newlines
+    let text = text.trim();
+
+    // Try to find sentence-ending punctuation
+    for (i, c) in text.char_indices() {
+        if (c == '.' || c == '!' || c == '?' || c == '\u{3002}' /* Chinese period */) && i > 10 {
+            // Check it's not an abbreviation (e.g., "U.S.")
+            let next_char = text[i + c.len_utf8()..].chars().next();
+            if next_char.map_or(true, |nc| nc.is_whitespace() || nc == '\n') {
+                return text[..=i].to_string();
+            }
+        }
+        // Also break on newline if we have enough text
+        if c == '\n' && i > 20 {
+            return text[..i].trim().to_string();
+        }
+    }
+
+    // No sentence boundary found, just take first 150 chars
+    if text.len() > 150 {
+        format!("{}...", &text[..147])
+    } else {
+        text.to_string()
+    }
+}
+
+/// Build compact article representation for agent scanning
+fn compact_article(a: &rss_core::Article, db: &Database) -> Value {
+    let feed_title = db.get_feed_title(a.feed_id).ok().flatten().unwrap_or_default();
+    let tags: Vec<String> = db.get_article_entities(a.id).unwrap_or_default();
+    let tags_str = tags.into_iter().take(5).collect::<Vec<_>>().join(",");
+    json!({
+        "id": a.id,
+        "title": a.title,
+        "source": feed_title,
+        "published_at": a.published_at.map(|d| d.to_rfc3339()),
+        "tldr": a.tldr,
+        "tags": tags_str,
+        "url": a.url,
     })
 }
 
@@ -422,7 +516,15 @@ fn main() -> ExitCode {
         Commands::List => {
             match db.list_feeds() {
                 Ok(feeds) => {
-                    let feed_values: Vec<Value> = feeds.iter().map(|f| serde_json::to_value(f).unwrap()).collect();
+                    let feed_values: Vec<Value> = feeds.iter().map(|f| {
+                        let mut val = serde_json::to_value(f).unwrap();
+                        if let Ok((total, unread, last_fetched)) = db.get_feed_stats(f.id) {
+                            val["article_count"] = json!(total);
+                            val["unread_count"] = json!(unread);
+                            val["last_fetched"] = json!(last_fetched);
+                        }
+                        val
+                    }).collect();
                     let mut next = vec![
                         action("rss add <url>", "Add a new feed", json!({"url": {"type": "string"}})),
                         action("rss articles", "List all articles", json!({})),
@@ -488,9 +590,21 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            // Auto-generate tldr for articles that don't have one yet
+            let mut tldrs_generated = 0;
+            if let Ok(no_tldr) = db.list_articles_without_tldr() {
+                for a in &no_tldr {
+                    if let Some(tldr) = generate_tldr(a) {
+                        db.set_article_tldr(a.id, &tldr).ok();
+                        tldrs_generated += 1;
+                    }
+                }
+            }
+
             success("fetch", json!({
                 "feeds_fetched": results.len(),
                 "results": results,
+                "tldrs_generated": tldrs_generated,
             }), vec![
                 action("rss articles --unread", "List unread articles", json!({})),
                 action("rss list", "List all feeds", json!({})),
@@ -500,14 +614,34 @@ fn main() -> ExitCode {
         // ---------------------------------------------------------------
         // ARTICLES  (Principle 4: default --count 30, truncated/total)
         // ---------------------------------------------------------------
-        Commands::Articles { feed, unread, count } => {
+        Commands::Articles { feed, unread, count, compact, json_lines } => {
             match db.list_articles(feed, unread) {
                 Ok(articles) => {
                     let total = articles.len();
                     let truncated = total > count;
-                    let page: Vec<Value> = articles.iter().take(count)
-                        .map(|a| serde_json::to_value(a).unwrap())
-                        .collect();
+
+                    if json_lines {
+                        // Output one JSON object per line, no envelope
+                        for a in articles.iter().take(count) {
+                            let val = if compact {
+                                compact_article(a, &db)
+                            } else {
+                                serde_json::to_value(a).unwrap()
+                            };
+                            println!("{}", serde_json::to_string(&val).unwrap());
+                        }
+                        return ExitCode::from(0);
+                    }
+
+                    let page: Vec<Value> = if compact {
+                        articles.iter().take(count)
+                            .map(|a| compact_article(a, &db))
+                            .collect()
+                    } else {
+                        articles.iter().take(count)
+                            .map(|a| serde_json::to_value(a).unwrap())
+                            .collect()
+                    };
                     let mut next: Vec<Value> = Vec::new();
                     for a in articles.iter().take(count) {
                         next.push(action(
@@ -539,22 +673,42 @@ fn main() -> ExitCode {
         // READ
         // ---------------------------------------------------------------
         Commands::Read { id } => {
-            match db.list_articles(None, false) {
-                Ok(articles) => {
-                    if let Some(article) = articles.into_iter().find(|a| a.id == id) {
-                        db.mark_read(id).ok();
-                        let article_val = serde_json::to_value(&article).unwrap();
-                        success("read", json!({
-                            "article": article_val,
-                        }), vec![
-                            action(&format!("rss fetch-full-text {}", id), "Get full-text content", json!({"id": {"value": id}})),
-                            action(&format!("rss star {}", id), "Star this article", json!({"id": {"value": id}})),
-                            action(&format!("rss articles --feed {}", article.feed_id), "More from this feed", json!({"feed_id": {"value": article.feed_id}})),
-                        ])
-                    } else {
-                        error("read", &format!("Article {} not found", id), "Use `rss articles` to find valid article IDs")
-                    }
+            match db.get_article(id) {
+                Ok(Some(article)) => {
+                    db.mark_read(id).ok();
+                    let feed_title = db.get_feed_title(article.feed_id).ok().flatten().unwrap_or_default();
+                    let tags: Vec<String> = db.get_article_entities(id).unwrap_or_default();
+                    let has_full_text = db.get_full_content(id).ok().flatten().is_some();
+
+                    // Content preview: first 500 chars of clean text
+                    let raw_content = article.full_content.as_deref()
+                        .or(article.content.as_deref())
+                        .or(article.summary.as_deref())
+                        .unwrap_or("");
+                    let clean = rss_ner::strip_html(raw_content);
+                    let content_preview = if clean.len() > 500 { &clean[..500] } else { &clean };
+                    let word_count = clean.split_whitespace().count();
+
+                    success("read", json!({
+                        "id": article.id,
+                        "title": article.title,
+                        "feed_title": feed_title,
+                        "url": article.url,
+                        "published_at": article.published_at.map(|d| d.to_rfc3339()),
+                        "tldr": article.tldr,
+                        "tags": tags.into_iter().take(10).collect::<Vec<_>>().join(","),
+                        "content_preview": content_preview,
+                        "has_full_text": has_full_text,
+                        "word_count": word_count,
+                        "is_read": true,
+                        "is_starred": article.is_starred,
+                    }), vec![
+                        action(&format!("rss fetch-full-text {}", id), "Get full-text content", json!({"id": {"value": id}})),
+                        action(&format!("rss star {}", id), "Star this article", json!({"id": {"value": id}})),
+                        action(&format!("rss articles --feed {}", article.feed_id), "More from this feed", json!({"feed_id": {"value": article.feed_id}})),
+                    ])
                 }
+                Ok(None) => error("read", &format!("Article {} not found", id), "Use `rss articles` to find valid article IDs"),
                 Err(e) => error("read", &format!("{}", e), "Check database"),
             }
         }
@@ -649,14 +803,36 @@ fn main() -> ExitCode {
         // ---------------------------------------------------------------
         // SEARCH  (Principle 4: default --count 30, truncated/total)
         // ---------------------------------------------------------------
-        Commands::Search { query, count } => {
-            match db.search_articles(&query) {
+        Commands::Search { query, count, since, compact } => {
+            let search_result = if let Some(ref since_str) = since {
+                db.search_articles_since(&query, since_str, count)
+            } else {
+                db.search_articles(&query)
+            };
+            match search_result {
                 Ok(articles) => {
                     let total = articles.len();
                     let truncated = total > count;
-                    let page: Vec<Value> = articles.iter().take(count)
-                        .map(|a| serde_json::to_value(a).unwrap())
-                        .collect();
+                    let page: Vec<Value> = if compact {
+                        articles.iter().take(count)
+                            .map(|a| {
+                                let mut cv = compact_article(a, &db);
+                                // Add match info
+                                let title_match = a.title.to_lowercase().contains(&query.to_lowercase());
+                                cv["matched_in"] = if title_match { json!("title") } else { json!("content") };
+                                cv
+                            })
+                            .collect()
+                    } else {
+                        articles.iter().take(count)
+                            .map(|a| {
+                                let mut v = serde_json::to_value(a).unwrap();
+                                let title_match = a.title.to_lowercase().contains(&query.to_lowercase());
+                                v["matched_in"] = if title_match { json!("title") } else { json!("content") };
+                                v
+                            })
+                            .collect()
+                    };
                     let mut next: Vec<Value> = Vec::new();
                     for a in articles.iter().take(count) {
                         next.push(action(
@@ -674,6 +850,7 @@ fn main() -> ExitCode {
                     }
                     success("search", json!({
                         "query": query,
+                        "since": since,
                         "articles": page,
                         "count": page.len(),
                         "total": total,
@@ -732,6 +909,30 @@ fn main() -> ExitCode {
                     ])
                 }
                 Err(e) => error("fetch-full-text", &format!("Extraction failed: {}", e), &format!("Try opening {} in a browser", url)),
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // _SUMMARIZE — generate tldr for articles without one
+        // ---------------------------------------------------------------
+        Commands::Summarize => {
+            match db.list_articles_without_tldr() {
+                Ok(articles) => {
+                    let mut count = 0;
+                    for a in &articles {
+                        if let Some(tldr) = generate_tldr(a) {
+                            db.set_article_tldr(a.id, &tldr).ok();
+                            count += 1;
+                        }
+                    }
+                    success("_summarize", json!({
+                        "articles_summarized": count,
+                        "articles_scanned": articles.len(),
+                    }), vec![
+                        action("rss articles --compact", "View articles with tldr", json!({})),
+                    ])
+                }
+                Err(e) => error("_summarize", &format!("{}", e), "Check database"),
             }
         }
 
