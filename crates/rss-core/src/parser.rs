@@ -26,6 +26,7 @@ pub fn parse_feed(url: &str, data: &[u8]) -> Result<(Feed, Vec<Article>), Box<dy
             is_read: false,
             is_starred: false,
             fetched_at: Utc::now(),
+            full_content: None,
         }
     }).collect();
 

@@ -15,3 +15,4 @@ dirs = "5"
 rss-core = { path = "../crates/rss-core" }
 rss-store = { path = "../crates/rss-store" }
 rss-fetch = { path = "../crates/rss-fetch" }
+rss-extract = { path = "../crates/rss-extract" }

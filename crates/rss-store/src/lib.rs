@@ -37,6 +37,10 @@ impl Database {
                 FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE
             );
         ")?;
+        // Migration: add full_content column if missing
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN full_content TEXT;"
+        );
         Ok(())
     }
 
@@ -123,6 +127,7 @@ impl Database {
                 fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                full_content: None,
             })
         })?.collect::<Result<Vec<_>, _>>()?;
         Ok(articles)
@@ -155,6 +160,7 @@ impl Database {
                 fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                full_content: None,
             })
         })?.collect::<Result<Vec<_>, _>>()?;
         Ok(articles)
@@ -163,5 +169,35 @@ impl Database {
     pub fn toggle_star(&self, article_id: i64) -> Result<bool, rusqlite::Error> {
         let changed = self.conn.execute("UPDATE articles SET is_starred = NOT is_starred WHERE id = ?1", [article_id])?;
         Ok(changed > 0)
+    }
+
+    pub fn get_full_content(&self, article_id: i64) -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT full_content FROM articles WHERE id = ?1"
+        )?;
+        match stmt.query_row([article_id], |row| row.get::<_, Option<String>>(0)) {
+            Ok(content) => Ok(content),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set_full_content(&self, article_id: i64, full_content: &str) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE articles SET full_content = ?1 WHERE id = ?2",
+            rusqlite::params![full_content, article_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn get_article_url(&self, article_id: i64) -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url FROM articles WHERE id = ?1"
+        )?;
+        match stmt.query_row([article_id], |row| row.get::<_, Option<String>>(0)) {
+            Ok(url) => Ok(url),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }

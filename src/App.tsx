@@ -38,6 +38,9 @@ export default function App() {
   const [lastRefreshTime, setLastRefreshTime] = createSignal<number | null>(null);
   const [lastRefreshLabel, setLastRefreshLabel] = createSignal("");
   const [showAddFeed, setShowAddFeed] = createSignal(false);
+  const [fullText, setFullText] = createSignal<string | null>(null);
+  const [fullTextLoading, setFullTextLoading] = createSignal(false);
+  const [fullTextError, setFullTextError] = createSignal<string | null>(null);
 
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLDivElement | undefined;
@@ -228,6 +231,9 @@ export default function App() {
   const selectArticle = async (article: Article, index?: number) => {
     setSelectedArticle(article);
     if (index !== undefined) setSelectedArticleIndex(index);
+    setFullText(null);
+    setFullTextError(null);
+    setFullTextLoading(false);
     setActivePane("reader");
     setArticleAnnouncement(
       `${article.title}, ${article.is_read ? "read" : "unread"}`
@@ -249,6 +255,24 @@ export default function App() {
     const sel = selectedArticle();
     if (sel && sel.id === id) {
       setSelectedArticle({ ...sel, is_starred: !sel.is_starred });
+    }
+  };
+
+  const contentSeemsTruncated = (article: Article): boolean => {
+    const content = article.content || article.summary || "";
+    return content.length < 500;
+  };
+
+  const fetchFullText = async (articleId: number) => {
+    setFullTextLoading(true);
+    setFullTextError(null);
+    try {
+      const html = await invoke<string>("fetch_full_text", { id: articleId });
+      setFullText(html);
+    } catch (e) {
+      setFullTextError(`${e}`);
+    } finally {
+      setFullTextLoading(false);
     }
   };
 
@@ -344,6 +368,12 @@ export default function App() {
       else if (e.key === "k") { e.preventDefault(); navigateArticle(-1); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
       else if (e.key === "n") { navigateUnread("next"); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
       else if (e.key === "p") { navigateUnread("prev"); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
+      else if (e.key === "f") {
+        const a = selectedArticle();
+        if (a && !fullText() && !fullTextLoading()) {
+          fetchFullText(a.id);
+        }
+      }
     }
   };
 
@@ -625,11 +655,23 @@ export default function App() {
                     >
                       {article().is_starred ? "\u2605 Starred" : "\u2606 Star"}
                     </button>
+                    <Show when={!fullText() && article().url}>
+                      <button
+                        onClick={() => fetchFullText(article().id)}
+                        disabled={fullTextLoading()}
+                        aria-label="Fetch full article text"
+                      >
+                        {fullTextLoading() ? "Loading..." : "Full Text"}
+                      </button>
+                    </Show>
+                    <Show when={fullTextError()}>
+                      <span class="error-text" role="alert">{fullTextError()}</span>
+                    </Show>
                   </div>
                 </header>
                 <div
                   class="article-content"
-                  innerHTML={article().content || article().summary || "<p>No content available.</p>"}
+                  innerHTML={fullText() || article().content || article().summary || "<p>No content available.</p>"}
                 />
               </article>
             )}

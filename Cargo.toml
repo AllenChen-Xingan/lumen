@@ -3,6 +3,7 @@ members = [
     "crates/rss-core",
     "crates/rss-store",
     "crates/rss-fetch",
+    "crates/rss-extract",
     "crates/rss-cli",
     "src-tauri",
 ]

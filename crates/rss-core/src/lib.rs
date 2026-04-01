@@ -23,6 +23,7 @@ pub struct Article {
     pub is_read: bool,
     pub is_starred: bool,
     pub fetched_at: DateTime<Utc>,
+    pub full_content: Option<String>,
 }
 
 pub mod parser;

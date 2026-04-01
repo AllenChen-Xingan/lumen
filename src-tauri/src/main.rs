@@ -115,6 +115,33 @@ fn export_opml(state: State<AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn fetch_full_text(id: i64, state: State<AppState>) -> Result<String, String> {
+    // Check cache first
+    let url = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        if let Some(cached) = db.get_full_content(id).map_err(|e| e.to_string())? {
+            return Ok(cached);
+        }
+        db.get_article_url(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Article has no URL".to_string())?
+    };
+    // DB lock released
+
+    // Run extraction
+    let result = rss_extract::extract_full_text(&url)
+        .map_err(|e| format!("Extraction failed: {}", e))?;
+
+    // Cache result
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_full_content(id, &result.html).map_err(|e| e.to_string())?;
+    }
+
+    Ok(result.html)
+}
+
+#[tauri::command]
 fn search_articles(query: String, state: State<AppState>) -> Result<Vec<Article>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.search_articles(&query).map_err(|e| e.to_string())
@@ -144,6 +171,7 @@ fn main() {
             import_opml,
             export_opml,
             search_articles,
+            fetch_full_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
