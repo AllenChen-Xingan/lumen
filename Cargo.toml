@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/rss-core",
+    "crates/rss-store",
+    "crates/rss-fetch",
+    "crates/rss-cli",
+]
+resolver = "2"

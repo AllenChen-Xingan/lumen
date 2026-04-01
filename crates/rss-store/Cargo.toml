@@ -1,0 +1,9 @@
+[package]
+name = "rss-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+rss-core = { path = "../rss-core" }
+chrono = "0.4"
