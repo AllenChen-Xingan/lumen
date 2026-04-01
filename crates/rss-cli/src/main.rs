@@ -115,6 +115,11 @@ enum FolderAction {
         #[arg(long)]
         except: Option<String>,
     },
+    /// Reject suggestions — system learns and avoids these next time
+    Reject {
+        /// Comma-separated indices to reject (e.g. "0,2"), or omit to reject all
+        indices: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +957,42 @@ fn main() -> ExitCode {
                                 "skipped": except_indices.len(),
                             }), vec![
                                 action("rss folders", "List all folders", json!({})),
+                            ])
+                        }
+                        Err(e) => error("folders", &format!("{}", e), "Check database"),
+                    }
+                }
+                Some(FolderAction::Reject { indices }) => {
+                    // Get current suggestions to map indices to names
+                    let suggestions = match db.suggest_smart_folders(4) {
+                        Ok(s) => s,
+                        Err(e) => return error("folders", &format!("{}", e), "Run `rss folders suggest` first"),
+                    };
+                    if suggestions.is_empty() {
+                        return error("folders", "No suggestions to reject", "Run `rss analyze` then `rss folders suggest`");
+                    }
+
+                    // Parse indices, or reject all if omitted
+                    let reject_indices: Vec<usize> = match indices {
+                        Some(ref s) => s.split(',')
+                            .filter_map(|i| i.trim().parse::<usize>().ok())
+                            .collect(),
+                        None => (0..suggestions.len()).collect(),
+                    };
+
+                    let rejected_names: Vec<String> = reject_indices.iter()
+                        .filter_map(|&i| suggestions.get(i).map(|(name, _, _, _)| name.clone()))
+                        .collect();
+
+                    match db.reject_entities(&rejected_names) {
+                        Ok(count) => {
+                            success("folders", json!({
+                                "action": "rejected",
+                                "rejected": rejected_names,
+                                "count": count,
+                                "effect": "These entities will be excluded from future suggestions",
+                            }), vec![
+                                action("rss folders suggest", "Get new suggestions (excluding rejected)", json!({})),
                             ])
                         }
                         Err(e) => error("folders", &format!("{}", e), "Check database"),

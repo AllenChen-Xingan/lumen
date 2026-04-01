@@ -80,6 +80,15 @@ impl Database {
             "ALTER TABLE articles ADD COLUMN analyzed INTEGER NOT NULL DEFAULT 0;"
         );
 
+        // Rejected suggestions (feedback loop)
+        self.conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS rejected_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_name TEXT NOT NULL,
+                rejected_at TEXT NOT NULL
+            );
+        ")?;
+
         Ok(())
     }
 
@@ -419,6 +428,11 @@ impl Database {
     /// Uses co-occurrence: entities that appear together in articles form a cluster.
     /// Returns: Vec<(cluster_name, entity_names_csv, article_count, query_string)>
     pub fn suggest_smart_folders(&self, max_folders: usize) -> Result<Vec<(String, String, i64, String)>, rusqlite::Error> {
+        // Layer 1: Get rejected entities to exclude
+        let rejected = self.get_rejected_entities().unwrap_or_default();
+        // Layer 2: Infer min entity length from rejection patterns
+        let min_len = self.infer_min_entity_length().unwrap_or(2);
+
         // Step 1: Get top entities by frequency (concepts first, then orgs)
         let mut stmt = self.conn.prepare(
             "SELECT name, entity_type, COUNT(DISTINCT article_id) as article_cnt
@@ -428,7 +442,7 @@ impl Database {
              ORDER BY
                  CASE entity_type WHEN 'concept' THEN 0 WHEN 'organization' THEN 1 ELSE 2 END,
                  article_cnt DESC
-             LIMIT 20"
+             LIMIT 30"
         )?;
         let top_entities: Vec<(String, String, i64)> = stmt.query_map([], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -438,13 +452,23 @@ impl Database {
             return Ok(vec![]);
         }
 
-        // Step 2: Greedily pick top entities as cluster seeds, skipping overlapping ones
+        // Step 2: Greedily pick top entities as cluster seeds, skipping rejected/short/overlapping
         let mut used_articles: std::collections::HashSet<i64> = std::collections::HashSet::new();
         let mut suggestions = Vec::new();
 
         for (name, etype, count) in &top_entities {
             if suggestions.len() >= max_folders {
                 break;
+            }
+
+            // Layer 1: Skip rejected entities
+            if rejected.iter().any(|r| r.eq_ignore_ascii_case(name)) {
+                continue;
+            }
+
+            // Layer 2: Skip entities shorter than inferred minimum
+            if name.len() < min_len {
+                continue;
             }
 
             // Get articles this entity appears in
@@ -510,6 +534,43 @@ impl Database {
             created.push((id, name.clone()));
         }
         Ok(created)
+    }
+
+    /// Record rejected entity names so future suggestions skip them
+    pub fn reject_entities(&self, names: &[String]) -> Result<usize, rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut count = 0;
+        for name in names {
+            self.conn.execute(
+                "INSERT INTO rejected_suggestions (entity_name, rejected_at) VALUES (?1, ?2)",
+                rusqlite::params![name, now],
+            )?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Get all rejected entity names
+    pub fn get_rejected_entities(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT entity_name FROM rejected_suggestions")?;
+        let results = stmt.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    /// Infer minimum entity name length from rejection patterns (Layer 2 heuristic)
+    /// If user keeps rejecting short entities, raise the bar
+    pub fn infer_min_entity_length(&self) -> Result<usize, rusqlite::Error> {
+        let rejected = self.get_rejected_entities()?;
+        if rejected.len() < 3 {
+            return Ok(2); // default: at least 2 chars
+        }
+        let avg_len: f64 = rejected.iter().map(|s| s.len() as f64).sum::<f64>() / rejected.len() as f64;
+        // If average rejected entity is short (≤5 chars), user prefers longer/more specific entities
+        if avg_len <= 5.0 {
+            Ok(6) // raise minimum to 6 chars
+        } else {
+            Ok(2)
+        }
     }
 
     pub fn get_folder_feed_articles(&self, folder_id: i64, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
