@@ -14,6 +14,7 @@ impl Database {
     }
 
     fn init(&self) -> Result<(), rusqlite::Error> {
+        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         self.conn.execute_batch("
             CREATE TABLE IF NOT EXISTS feeds (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
