@@ -288,6 +288,51 @@ fn move_feed(feed_id: i64, folder_id: Option<i64>) -> Result<bool, String> {
     Ok(true)
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SmartFolderSuggestion {
+    pub index: usize,
+    pub name: String,
+    pub related_entities: Option<String>,
+    pub article_count: i64,
+    pub query: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ResetResult {
+    pub deleted: usize,
+    pub reason: String,
+    pub new_suggestions: Vec<SmartFolderSuggestion>,
+}
+
+#[tauri::command]
+fn suggest_folders() -> Result<Vec<SmartFolderSuggestion>, String> {
+    let result = cli(&["folders", "suggest"])?;
+    let suggestions: Vec<SmartFolderSuggestion> = serde_json::from_value(result["suggestions"].clone())
+        .unwrap_or_default();
+    Ok(suggestions)
+}
+
+#[tauri::command]
+fn accept_folders(except: Option<String>) -> Result<Vec<Folder>, String> {
+    let mut args = vec!["folders", "accept"];
+    let except_str;
+    if let Some(ref e) = except {
+        except_str = e.clone();
+        args.push("--except");
+        args.push(&except_str);
+    }
+    let result = cli(&args)?;
+    let folders: Vec<Folder> = serde_json::from_value(result["created"].clone())
+        .unwrap_or_default();
+    Ok(folders)
+}
+
+#[tauri::command]
+fn reset_folders(reason: String) -> Result<serde_json::Value, String> {
+    let result = cli(&["folders", "reset", "--reason", &reason])?;
+    Ok(result)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -311,6 +356,9 @@ fn main() {
             create_folder,
             delete_folder,
             move_feed,
+            suggest_folders,
+            accept_folders,
+            reset_folders,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
