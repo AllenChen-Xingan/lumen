@@ -35,6 +35,8 @@ export default function App() {
   const [activePane, setActivePane] = createSignal<"feeds" | "articles" | "reader">("feeds");
   const [articleAnnouncement, setArticleAnnouncement] = createSignal("");
   const [searchQuery, setSearchQuery] = createSignal("");
+  const [lastRefreshTime, setLastRefreshTime] = createSignal<number | null>(null);
+  const [lastRefreshLabel, setLastRefreshLabel] = createSignal("");
 
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLUListElement | undefined;
@@ -122,11 +124,28 @@ export default function App() {
     }
   };
 
+  const updateRefreshLabel = () => {
+    const t = lastRefreshTime();
+    if (t === null) {
+      setLastRefreshLabel("");
+      return;
+    }
+    const seconds = Math.floor((Date.now() - t) / 1000);
+    if (seconds < 60) {
+      setLastRefreshLabel("Last refresh: just now");
+    } else {
+      const minutes = Math.floor(seconds / 60);
+      setLastRefreshLabel(`Last refresh: ${minutes} min ago`);
+    }
+  };
+
   const fetchAll = async () => {
     setStatus("Fetching...");
     try {
       const results = await invoke<string[]>("fetch_feeds");
       setStatus(results.join("; "));
+      setLastRefreshTime(Date.now());
+      updateRefreshLabel();
       const fid = selectedFeed();
       await loadArticles(fid ?? undefined);
     } catch (e) {
@@ -326,10 +345,20 @@ export default function App() {
   onMount(() => {
     loadFeeds();
     document.addEventListener("keydown", handleKeyDown);
-  });
 
-  onCleanup(() => {
-    document.removeEventListener("keydown", handleKeyDown);
+    const autoRefreshInterval = setInterval(() => {
+      fetchAll();
+    }, 15 * 60 * 1000);
+
+    const labelUpdateInterval = setInterval(() => {
+      updateRefreshLabel();
+    }, 30 * 1000);
+
+    onCleanup(() => {
+      document.removeEventListener("keydown", handleKeyDown);
+      clearInterval(autoRefreshInterval);
+      clearInterval(labelUpdateInterval);
+    });
   });
 
   return (
@@ -347,7 +376,10 @@ export default function App() {
 
       {/* Status bar */}
       <div class="status-bar" role="status" aria-live="polite" aria-atomic="true">
-        {status()}
+        <span>{status()}</span>
+        <Show when={lastRefreshLabel()}>
+          <span class="refresh-indicator">{lastRefreshLabel()}</span>
+        </Show>
       </div>
 
       <div class="layout">

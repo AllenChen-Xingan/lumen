@@ -43,7 +43,7 @@ fully accessible with NVDA screen reader. Architecture: Rust CLI core + Tauri + 
 ### Sprint 5: Polish [DONE]
 - [x] OPML import/export
 - [x] Full-text search
-- [ ] Auto-refresh interval
+- [x] Auto-refresh interval
 - [x] High contrast theme
 - [ ] Final NVDA manual test checklist
 

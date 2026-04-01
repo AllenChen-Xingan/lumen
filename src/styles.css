@@ -64,6 +64,14 @@ body {
   background: var(--pane-bg);
   border-bottom: 1px solid var(--border);
   min-height: 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.refresh-indicator {
+  opacity: 0.7;
+  font-size: 0.8rem;
 }
 
 .layout {
