@@ -393,6 +393,8 @@ export default function App() {
       updateRefreshLabel();
       const fid = selectedFeed();
       await loadArticles(fid ?? undefined);
+      // Auto-analyze new articles in background (silent, no UI block)
+      invoke("analyze_articles").catch(() => {});
     } catch (e) {
       setStatus(`Error: ${e}`);
     }

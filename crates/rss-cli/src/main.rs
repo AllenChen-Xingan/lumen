@@ -60,14 +60,16 @@ enum Commands {
     },
     /// Fetch full-text content for an article (cached)
     FetchFullText { id: i64 },
-    /// Analyze articles with NER (extract entities)
+    /// Internal: analyze articles with NER
+    #[command(name = "_analyze", hide = true)]
     Analyze {
         #[arg(long)]
         article: Option<i64>,
         #[arg(long)]
         download_model: bool,
     },
-    /// Query extracted entities
+    /// Internal: query extracted entities
+    #[command(name = "_entities", hide = true)]
     Entities {
         #[arg(long)]
         entity_type: Option<String>,

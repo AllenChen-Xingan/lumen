@@ -251,7 +251,7 @@ pub struct AnalyzeResult {
 
 #[tauri::command]
 fn analyze_articles() -> Result<AnalyzeResult, String> {
-    let result = cli(&["analyze"])?;
+    let result = cli(&["_analyze"])?;
     let analyze: AnalyzeResult = serde_json::from_value(result.clone())
         .map_err(|e| format!("Failed to parse analyze result: {}", e))?;
     Ok(analyze)
