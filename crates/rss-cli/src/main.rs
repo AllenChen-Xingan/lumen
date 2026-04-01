@@ -107,6 +107,14 @@ enum FolderAction {
         #[arg(long, default_value_t = 30)]
         count: usize,
     },
+    /// Suggest smart folders based on entity clustering (does NOT create them)
+    Suggest,
+    /// Accept suggested folders (creates them)
+    Accept {
+        /// Comma-separated indices to exclude (e.g. "1,3" to skip suggestions 1 and 3)
+        #[arg(long)]
+        except: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +297,7 @@ fn describe_commands() -> Value {
             },
             {
                 "name": "folders",
-                "description": "Manage folders (list, create, remove, articles)",
+                "description": "Manage folders: list, suggest (AI), accept, create, remove, articles",
                 "args": []
             },
             {
@@ -881,6 +889,70 @@ fn main() -> ExitCode {
                             } else {
                                 error("folders", &format!("Folder {} not found", id), "Use `rss folders` to see IDs")
                             }
+                        }
+                        Err(e) => error("folders", &format!("{}", e), "Check database"),
+                    }
+                }
+                Some(FolderAction::Suggest) => {
+                    match db.suggest_smart_folders(4) {
+                        Ok(suggestions) => {
+                            if suggestions.is_empty() {
+                                return error("folders", "No entity data. Run `rss analyze` first", "Run `rss analyze` to extract entities from articles");
+                            }
+                            let items: Vec<Value> = suggestions.iter().enumerate()
+                                .map(|(i, (name, related, count, query))| json!({
+                                    "index": i,
+                                    "name": name,
+                                    "related_entities": related,
+                                    "article_count": count,
+                                    "query": query,
+                                }))
+                                .collect();
+                            success("folders", json!({
+                                "action": "suggest",
+                                "suggestions": items,
+                                "count": items.len(),
+                                "max": 4,
+                                "action_required": "Review suggestions, then run `rss folders accept` to create them. Use --except to skip specific indices.",
+                            }), vec![
+                                action("rss folders accept", "Accept all suggestions", json!({})),
+                                action("rss folders accept --except 2", "Accept all except index 2", json!({})),
+                                action("rss folders suggest", "Re-generate suggestions", json!({})),
+                            ])
+                        }
+                        Err(e) => error("folders", &format!("{}", e), "Run `rss analyze` first"),
+                    }
+                }
+                Some(FolderAction::Accept { except }) => {
+                    // First generate suggestions
+                    let suggestions = match db.suggest_smart_folders(4) {
+                        Ok(s) => s,
+                        Err(e) => return error("folders", &format!("{}", e), "Run `rss folders suggest` first"),
+                    };
+                    if suggestions.is_empty() {
+                        return error("folders", "No suggestions available", "Run `rss analyze` then `rss folders suggest`");
+                    }
+
+                    // Parse except indices
+                    let except_indices: Vec<usize> = except
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<usize>().ok())
+                        .collect();
+
+                    match db.accept_suggested_folders(&suggestions, &except_indices) {
+                        Ok(created) => {
+                            let items: Vec<Value> = created.iter()
+                                .map(|(id, name)| json!({"folder_id": id, "name": name}))
+                                .collect();
+                            success("folders", json!({
+                                "action": "accepted",
+                                "created": items,
+                                "count": items.len(),
+                                "skipped": except_indices.len(),
+                            }), vec![
+                                action("rss folders", "List all folders", json!({})),
+                            ])
                         }
                         Err(e) => error("folders", &format!("{}", e), "Check database"),
                     }

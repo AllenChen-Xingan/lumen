@@ -415,6 +415,103 @@ impl Database {
         Ok(articles)
     }
 
+    /// Cluster entities into top N topic groups for smart folder suggestions.
+    /// Uses co-occurrence: entities that appear together in articles form a cluster.
+    /// Returns: Vec<(cluster_name, entity_names_csv, article_count, query_string)>
+    pub fn suggest_smart_folders(&self, max_folders: usize) -> Result<Vec<(String, String, i64, String)>, rusqlite::Error> {
+        // Step 1: Get top entities by frequency (concepts first, then orgs)
+        let mut stmt = self.conn.prepare(
+            "SELECT name, entity_type, COUNT(DISTINCT article_id) as article_cnt
+             FROM entities
+             GROUP BY name, entity_type
+             HAVING article_cnt >= 2
+             ORDER BY
+                 CASE entity_type WHEN 'concept' THEN 0 WHEN 'organization' THEN 1 ELSE 2 END,
+                 article_cnt DESC
+             LIMIT 20"
+        )?;
+        let top_entities: Vec<(String, String, i64)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        if top_entities.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Step 2: Greedily pick top entities as cluster seeds, skipping overlapping ones
+        let mut used_articles: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut suggestions = Vec::new();
+
+        for (name, etype, count) in &top_entities {
+            if suggestions.len() >= max_folders {
+                break;
+            }
+
+            // Get articles this entity appears in
+            let mut art_stmt = self.conn.prepare(
+                "SELECT DISTINCT article_id FROM entities WHERE name = ?1"
+            )?;
+            let articles: Vec<i64> = art_stmt.query_map([name.as_str()], |row| {
+                row.get(0)
+            })?.collect::<Result<Vec<_>, _>>()?;
+
+            // Skip if > 50% overlap with already-used articles
+            let overlap = articles.iter().filter(|a| used_articles.contains(a)).count();
+            if !articles.is_empty() && overlap as f64 / articles.len() as f64 > 0.5 {
+                continue;
+            }
+
+            // Find co-occurring entities for this cluster
+            let mut co_stmt = self.conn.prepare(
+                "SELECT e2.name, COUNT(DISTINCT e2.article_id) as cnt
+                 FROM entities e1
+                 JOIN entities e2 ON e1.article_id = e2.article_id AND e1.name != e2.name
+                 WHERE e1.name = ?1
+                 GROUP BY e2.name
+                 ORDER BY cnt DESC
+                 LIMIT 3"
+            )?;
+            let co_entities: Vec<String> = co_stmt.query_map([name.as_str()], |row| {
+                row.get::<_, String>(0)
+            })?.collect::<Result<Vec<_>, _>>()?;
+
+            // Build cluster
+            let cluster_name = name.clone();
+            let mut all_names = vec![name.clone()];
+            all_names.extend(co_entities.iter().cloned());
+            let names_csv = all_names.join(", ");
+
+            // Build query string for the smart folder
+            let query = if etype == "concept" {
+                format!("type:concept AND name:{}*", name)
+            } else {
+                name.clone()
+            };
+
+            // Mark these articles as used
+            for a in &articles {
+                used_articles.insert(*a);
+            }
+
+            suggestions.push((cluster_name, names_csv, *count, query));
+        }
+
+        Ok(suggestions)
+    }
+
+    /// Accept suggested smart folders — create them in DB
+    pub fn accept_suggested_folders(&self, suggestions: &[(String, String, i64, String)], except: &[usize]) -> Result<Vec<(i64, String)>, rusqlite::Error> {
+        let mut created = Vec::new();
+        for (i, (name, _names_csv, _count, query)) in suggestions.iter().enumerate() {
+            if except.contains(&i) {
+                continue;
+            }
+            let id = self.create_folder(name, "smart", Some(query))?;
+            created.push((id, name.clone()));
+        }
+        Ok(created)
+    }
+
     pub fn get_folder_feed_articles(&self, folder_id: i64, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT a.id, a.feed_id, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
