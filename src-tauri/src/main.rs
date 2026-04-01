@@ -217,6 +217,46 @@ fn export_opml() -> Result<String, String> {
         .ok_or_else(|| "Missing opml in result".to_string())
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Folder {
+    pub id: i64,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub folder_type: String,
+    pub query: Option<String>,
+}
+
+#[tauri::command]
+fn list_folders() -> Result<Vec<Folder>, String> {
+    let result = cli(&["folders"])?;
+    let folders: Vec<Folder> = serde_json::from_value(result["folders"].clone())
+        .map_err(|e| format!("Failed to parse folders: {}", e))?;
+    Ok(folders)
+}
+
+#[tauri::command]
+fn folder_articles(id: i64, count: Option<usize>) -> Result<Vec<Article>, String> {
+    let count_str = (count.unwrap_or(100)).to_string();
+    let result = cli(&["folders", "articles", &id.to_string(), "--count", &count_str])?;
+    let articles: Vec<Article> = serde_json::from_value(result["articles"].clone())
+        .map_err(|e| format!("Failed to parse articles: {}", e))?;
+    Ok(articles)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AnalyzeResult {
+    pub articles_analyzed: i64,
+    pub entities_found: i64,
+}
+
+#[tauri::command]
+fn analyze_articles() -> Result<AnalyzeResult, String> {
+    let result = cli(&["analyze"])?;
+    let analyze: AnalyzeResult = serde_json::from_value(result.clone())
+        .map_err(|e| format!("Failed to parse analyze result: {}", e))?;
+    Ok(analyze)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -234,6 +274,9 @@ fn main() {
             export_opml,
             search_articles,
             fetch_full_text,
+            list_folders,
+            folder_articles,
+            analyze_articles,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

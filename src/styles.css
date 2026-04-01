@@ -165,6 +165,28 @@ ul[role="listbox"] li {
   padding: 0;
 }
 
+/* Smart folders section */
+.folders-section {
+  border-bottom: 2px solid var(--border);
+}
+
+.section-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--read);
+  padding: 6px 12px 2px;
+}
+
+.folder-list {
+  list-style: none;
+}
+
+.folder-icon {
+  font-size: 0.85rem;
+  width: 18px;
+}
+
 /* Feed list items */
 .feed-button {
   display: flex;

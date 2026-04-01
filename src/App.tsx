@@ -23,6 +23,13 @@ interface Article {
   fetched_at: string;
 }
 
+interface Folder {
+  id: number;
+  name: string;
+  type: string;  // "manual" | "smart"
+  query: string | null;
+}
+
 export default function App() {
   const [feeds, setFeeds] = createSignal<Feed[]>([]);
   const [articles, setArticles] = createSignal<Article[]>([]);
@@ -41,6 +48,8 @@ export default function App() {
   const [fullText, setFullText] = createSignal<string | null>(null);
   const [fullTextLoading, setFullTextLoading] = createSignal(false);
   const [fullTextError, setFullTextError] = createSignal<string | null>(null);
+  const [folders, setFolders] = createSignal<Folder[]>([]);
+  const [selectedFolder, setSelectedFolder] = createSignal<number | null>(null);
 
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLDivElement | undefined;
@@ -84,6 +93,15 @@ export default function App() {
     }
   };
 
+  const loadFolders = async () => {
+    try {
+      const result = await invoke<Folder[]>("list_folders");
+      setFolders(result);
+    } catch (e) {
+      // Folders not available yet — that's fine
+    }
+  };
+
   const loadArticles = async (feedId?: number) => {
     try {
       const result = await invoke<Article[]>("list_articles", {
@@ -115,6 +133,7 @@ export default function App() {
   };
 
   const loadAllArticles = async () => {
+    setSelectedFolder(null);
     setSelectedFeed(null);
     setSelectedArticle(null);
     setSelectedArticleIndex(0);
@@ -223,7 +242,24 @@ export default function App() {
     }
   };
 
+  const selectFolder = async (folder: Folder) => {
+    setSelectedFolder(folder.id);
+    setSelectedFeed(null);
+    setSelectedArticle(null);
+    setSelectedArticleIndex(0);
+    setActivePane("articles");
+    try {
+      const result = await invoke<Article[]>("folder_articles", { id: folder.id });
+      setArticles(result);
+      setStatus(`${folder.name}: ${result.length} articles`);
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
+    requestAnimationFrame(() => focusArticleItem(0));
+  };
+
   const selectFeed = async (feed: Feed, index?: number) => {
+    setSelectedFolder(null);
     setSelectedFeed(feed.id);
     if (index !== undefined) setSelectedFeedIndex(index);
     setSelectedArticle(null);
@@ -392,6 +428,7 @@ export default function App() {
 
   onMount(() => {
     loadFeeds();
+    loadFolders();
     document.addEventListener("keydown", handleKeyDown);
 
     const autoRefreshInterval = setInterval(() => {
@@ -485,6 +522,35 @@ export default function App() {
                 <button onClick={importOpml} aria-label="Import feeds from OPML file">Import OPML</button>
                 <button onClick={exportOpml} aria-label="Export feeds as OPML file">Export OPML</button>
               </div>
+            </div>
+          </Show>
+
+          <Show when={folders().length > 0}>
+            <div class="folders-section">
+              <h3 class="section-label">Smart Folders</h3>
+              <ul role="listbox" aria-label="Smart folders" class="folder-list">
+                <For each={folders()}>
+                  {(folder) => (
+                    <li
+                      role="option"
+                      class="feed-button"
+                      tabindex={selectedFolder() === folder.id ? 0 : -1}
+                      aria-selected={selectedFolder() === folder.id}
+                      aria-label={`${folder.name} smart folder`}
+                      onClick={() => selectFolder(folder)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          selectFolder(folder);
+                        }
+                      }}
+                    >
+                      <span class="folder-icon" aria-hidden="true">📁</span>
+                      <span class="feed-title">{folder.name}</span>
+                    </li>
+                  )}
+                </For>
+              </ul>
             </div>
           </Show>
 
