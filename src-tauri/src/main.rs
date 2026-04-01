@@ -243,9 +243,9 @@ fn list_folders() -> Result<Vec<Folder>, String> {
 }
 
 #[tauri::command]
-fn folder_articles(name: String, count: Option<usize>) -> Result<Vec<Article>, String> {
+fn folder_articles(tag: String, count: Option<usize>) -> Result<Vec<Article>, String> {
     let count_str = (count.unwrap_or(100)).to_string();
-    let result = cli(&["folders", "articles", &name, "--count", &count_str])?;
+    let result = cli(&["folders", "articles", &tag, "--count", &count_str])?;
     let articles: Vec<Article> = serde_json::from_value(result["articles"].clone())
         .map_err(|e| format!("Failed to parse articles: {}", e))?;
     Ok(articles)
@@ -253,8 +253,15 @@ fn folder_articles(name: String, count: Option<usize>) -> Result<Vec<Article>, S
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClassifyResult {
-    pub articles_classified: i64,
-    pub tags_assigned: i64,
+    pub articles_processed: i64,
+    pub classified: i64,
+    pub unclassifiable: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FolderCount {
+    pub name: String,
+    pub count: i64,
 }
 
 #[tauri::command]
@@ -303,6 +310,20 @@ fn reset_folders() -> Result<serde_json::Value, String> {
     Ok(result)
 }
 
+#[tauri::command]
+fn tag_article(id: i64, tags: String) -> Result<bool, String> {
+    cli(&["_tag", &id.to_string(), "--tags", &tags])?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn folder_counts() -> Result<Vec<FolderCount>, String> {
+    let result = cli(&["folders"])?;
+    let folders: Vec<FolderCount> = serde_json::from_value(result["folders"].clone())
+        .map_err(|e| format!("Failed to parse folder counts: {}", e))?;
+    Ok(folders)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -322,11 +343,13 @@ fn main() {
             fetch_full_text,
             list_folders,
             folder_articles,
+            folder_counts,
             classify_articles,
             create_folder,
             delete_folder,
             move_feed,
             reset_folders,
+            tag_article,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

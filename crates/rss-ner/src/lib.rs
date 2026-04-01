@@ -1,18 +1,20 @@
 use ort::session::Session;
 use ort::value::Tensor;
-
+use serde::Serialize;
 use std::path::PathBuf;
 
-/// Fixed cognitive folders for article classification
-pub const COGNITIVE_FOLDERS: &[(&str, &str)] = &[
-    ("新知", "novel discovery, breakthrough, new concept, first-of-kind, emerging technology, unprecedented finding"),
-    ("动态", "product release, funding round, acquisition, update, partnership, launch, version upgrade"),
-    ("深度", "in-depth analysis, methodology, investigation, long-form essay, deep dive, comprehensive review"),
-    ("行动", "tutorial, how-to guide, review, deal, practical advice, step-by-step, tool recommendation"),
-];
+#[derive(Debug, Clone, Serialize)]
+pub struct Classification {
+    pub tag: String,    // "新知" | "动态" | "深度" | "行动"
+    pub score: f32,     // cosine similarity to category embedding
+}
 
-/// Cosine similarity threshold for classification
-const CLASSIFY_THRESHOLD: f32 = 0.3;
+pub const CATEGORIES: &[(&str, &str)] = &[
+    ("新知", "novel discovery, breakthrough, new concept, first-of-kind, emerging technology, scientific finding, paradigm shift"),
+    ("动态", "product release, funding round, acquisition, update, partnership, launch, industry news, market movement"),
+    ("深度", "in-depth analysis, methodology, investigation, long-form essay, deep dive, research paper, comprehensive review"),
+    ("行动", "tutorial, how-to guide, step-by-step, practical advice, tool review, actionable tips, implementation guide"),
+];
 
 // ── Model Management ──
 
@@ -30,7 +32,7 @@ pub fn is_embed_model_available() -> bool {
     dir.join("embed_model_int8.onnx").exists() && dir.join("embed_tokenizer.json").exists()
 }
 
-/// Download embedding model (all-MiniLM-L6-v2) from HuggingFace
+/// Download embedding model from HuggingFace (all-MiniLM-L6-v2)
 pub fn download_model() -> Result<(), Box<dyn std::error::Error>> {
     let dir = model_dir();
 
@@ -39,11 +41,11 @@ pub fn download_model() -> Result<(), Box<dyn std::error::Error>> {
         ("tokenizer.json", "embed_tokenizer.json"),
     ];
 
-    let embed_base = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main";
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
+    let embed_base = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main";
     for (remote, local) in &embed_files {
         let path = dir.join(local);
         if path.exists() {
@@ -53,6 +55,9 @@ pub fn download_model() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = client.get(&url).send()?.bytes()?;
         std::fs::write(&path, &bytes)?;
     }
+
+    // Precompute category embeddings after model download
+    precompute_category_embeddings()?;
 
     Ok(())
 }
@@ -83,10 +88,12 @@ pub fn strip_html(html: &str) -> String {
         .replace("&nbsp;", " ")
 }
 
+// ── Sentence Embedding ──
+
 /// Embed text into a 384-dimensional vector using all-MiniLM-L6-v2
 pub fn embed_text(text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     if !is_embed_model_available() {
-        return Err("Embedding model not found. Run `rss _classify --download-model` first.".into());
+        return Err("Embedding model not found. Run `rss analyze --download-model` first.".into());
     }
 
     let dir = model_dir();
@@ -153,98 +160,93 @@ pub fn embed_text(text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     Ok(pooled)
 }
 
-/// Cosine similarity between two L2-normalized vectors (= dot product)
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    // vectors are already L2-normalized, so dot product = cosine similarity
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
-// ── Category Embedding Cache ──
+// ── Category Embedding Classification ──
 
-fn category_cache_path() -> PathBuf {
-    model_dir().join("category_embeddings.bin")
-}
-
-/// Precompute and cache the 4 category seed embeddings
+/// Precompute category embeddings and save to model directory
 pub fn precompute_category_embeddings() -> Result<(), Box<dyn std::error::Error>> {
-    let mut data: Vec<u8> = Vec::new();
+    let dir = model_dir();
+    let path = dir.join("category_embeddings.bin");
 
-    for (name, seed_text) in COGNITIVE_FOLDERS {
-        let emb = embed_text(seed_text)?;
-        // Write: name_len(u32) + name_bytes + 384 floats
+    let mut embeddings: Vec<(String, Vec<f32>)> = Vec::new();
+    for (name, desc) in CATEGORIES {
+        let emb = embed_text(desc)?;
+        embeddings.push((name.to_string(), emb));
+    }
+
+    // Simple binary format: for each category, write name_len(u32), name_bytes, then 384 f32s
+    let mut data = Vec::new();
+    for (name, emb) in &embeddings {
         let name_bytes = name.as_bytes();
         data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         data.extend_from_slice(name_bytes);
-        for val in &emb {
+        for &val in emb {
             data.extend_from_slice(&val.to_le_bytes());
         }
     }
-
-    std::fs::write(category_cache_path(), &data)?;
+    std::fs::write(&path, &data)?;
     Ok(())
 }
 
-/// Load cached category embeddings. Returns Vec<(folder_name, embedding)>.
+/// Load precomputed category embeddings from file
 pub fn load_category_embeddings() -> Result<Vec<(String, Vec<f32>)>, Box<dyn std::error::Error>> {
-    let path = category_cache_path();
+    let path = model_dir().join("category_embeddings.bin");
     if !path.exists() {
-        // Auto-compute if not cached
+        // Auto-compute if missing
         precompute_category_embeddings()?;
     }
 
     let data = std::fs::read(&path)?;
-    let mut cursor = 0;
-    let mut result = Vec::new();
+    let mut offset = 0;
+    let mut categories = Vec::new();
 
-    while cursor < data.len() {
-        // Read name
-        if cursor + 4 > data.len() { break; }
-        let name_len = u32::from_le_bytes(data[cursor..cursor+4].try_into()?) as usize;
-        cursor += 4;
-        if cursor + name_len > data.len() { break; }
-        let name = String::from_utf8(data[cursor..cursor+name_len].to_vec())?;
-        cursor += name_len;
+    while offset < data.len() {
+        let name_len = u32::from_le_bytes(data[offset..offset+4].try_into()?) as usize;
+        offset += 4;
+        let name = String::from_utf8(data[offset..offset+name_len].to_vec())?;
+        offset += name_len;
 
-        // Read 384 floats
-        let float_bytes = 384 * 4;
-        if cursor + float_bytes > data.len() { break; }
         let mut emb = Vec::with_capacity(384);
-        for i in 0..384 {
-            let start = cursor + i * 4;
-            let val = f32::from_le_bytes(data[start..start+4].try_into()?);
+        for _ in 0..384 {
+            let val = f32::from_le_bytes(data[offset..offset+4].try_into()?);
             emb.push(val);
+            offset += 4;
         }
-        cursor += float_bytes;
-
-        result.push((name, emb));
+        categories.push((name, emb));
     }
 
-    if result.len() != COGNITIVE_FOLDERS.len() {
-        return Err(format!(
-            "Expected {} category embeddings, found {}",
-            COGNITIVE_FOLDERS.len(),
-            result.len()
-        ).into());
-    }
-
-    Ok(result)
+    Ok(categories)
 }
 
-/// Classify an article by title+summary into cognitive folder tags.
-/// Returns tag names where cosine similarity > threshold (not mutually exclusive).
-pub fn classify_article(title: &str, summary: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let text = format!("{} {}", title, strip_html(summary));
-    let truncated = if text.len() > 2000 { &text[..2000] } else { &text };
-
-    let article_emb = embed_text(truncated)?;
+/// Classify an article into cognitive folders by embedding cosine similarity.
+/// Returns scores for ALL 4 categories (harness layer decides thresholds).
+pub fn classify_article(title: &str, summary: &str) -> Result<Vec<Classification>, Box<dyn std::error::Error>> {
     let categories = load_category_embeddings()?;
 
-    let mut tags = Vec::new();
-    for (name, cat_emb) in &categories {
-        let sim = cosine_similarity(&article_emb, cat_emb);
-        if sim > CLASSIFY_THRESHOLD {
-            tags.push(name.clone());
-        }
-    }
+    // Combine title + summary for embedding
+    let text = if summary.is_empty() {
+        title.to_string()
+    } else {
+        format!("{} {}", title, strip_html(summary))
+    };
 
-    Ok(tags)
+    // Truncate to reasonable length
+    let truncated = if text.len() > 2000 { &text[..2000] } else { &text };
+    let article_emb = embed_text(truncated)?;
+
+    let mut results: Vec<Classification> = categories.iter()
+        .map(|(name, cat_emb)| Classification {
+            tag: name.clone(),
+            score: cosine_similarity(&article_emb, cat_emb),
+        })
+        .collect();
+
+    // Sort by score descending
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+    Ok(results)
 }
