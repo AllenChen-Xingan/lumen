@@ -29,7 +29,9 @@
       "Bash(curl -s \"https://crates.io/api/v1/crates/tokenizers\")",
       "Bash(python -m json.tool)",
       "Bash(python -c ':*)",
-      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")"
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
+      "Read(//c/Users/tecmu/.claude/skills/search-exa/**)",
+      "Bash(bash ./scripts/search.sh '{\"query\": \"ARIA feed role implementation example NVDA screen reader article list navigation\", \"type\": \"neural\", \"numResults\": 5, \"contents\": {\"highlights\": true, \"summary\": true}}')"
     ]
   }
 }

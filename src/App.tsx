@@ -26,7 +26,7 @@ interface Article {
 interface Folder {
   id: number | null;
   name: string;
-  type: string;  // "cognitive" | "manual" | "smart"
+  type: string;  // "smart_view" | "manual" | "smart"
   query: string | null;
   article_count: number | null;
 }
@@ -69,7 +69,7 @@ export default function App() {
 
   const unreadCount = () => articles().filter((a) => !a.is_read).length;
 
-  const cognitiveFolders = () => folders().filter(f => f.type === "cognitive");
+  const cognitiveFolders = () => folders().filter(f => f.type === "smart_view");
   const manualFolders = () => folders().filter(f => f.type === "manual");
 
   const toggleSection = (section: string) => {
@@ -399,7 +399,7 @@ export default function App() {
     setSelectedArticleIndex(0);
     setActivePane("articles");
     try {
-      const result = await invoke<Article[]>("folder_articles", { name: folderName });
+      const result = await invoke<Article[]>("folder_articles", { tag: folderName });
       setArticles(result);
       setStatus(`${folderName}: ${result.length} articles`);
     } catch (e) {
