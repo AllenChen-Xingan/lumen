@@ -161,7 +161,7 @@ ul {
   list-style: none;
 }
 
-ul[role="list"] li {
+ul[role="listbox"] li {
   padding: 0;
 }
 
@@ -185,7 +185,7 @@ ul[role="list"] li {
   background: var(--hover);
 }
 
-.feed-button[aria-current="true"] {
+.feed-button[aria-selected="true"] {
   background: var(--accent);
   color: #fff;
 }
@@ -393,7 +393,7 @@ input:focus-visible,
     outline-offset: 2px;
   }
 
-  .feed-button[aria-current="true"] {
+  .feed-button[aria-selected="true"] {
     background: Highlight;
     color: HighlightText;
     forced-color-adjust: none;

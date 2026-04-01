@@ -46,11 +46,9 @@ export default function App() {
   const unreadCount = () => articles().filter((a) => !a.is_read).length;
 
   const focusFeedItem = (index: number) => {
-    const items = feedListRef?.querySelectorAll<HTMLElement>('[role="listitem"]');
+    const items = feedListRef?.querySelectorAll<HTMLElement>('[role="option"]');
     if (items && items[index]) {
-      const btn = items[index].querySelector<HTMLElement>('button');
-      if (btn) btn.focus();
-      else items[index].focus();
+      items[index].focus();
     }
   };
 
@@ -276,10 +274,10 @@ export default function App() {
     }
   };
 
+  // Feed index: 0 = "All Articles", 1+ = feeds()[i-1]
   const navigateFeed = (delta: number) => {
-    const list = feeds();
-    if (!list.length) return;
-    const newIndex = Math.max(0, Math.min(list.length - 1, selectedFeedIndex() + delta));
+    const totalItems = feeds().length + 1; // +1 for "All Articles"
+    const newIndex = Math.max(0, Math.min(totalItems - 1, selectedFeedIndex() + delta));
     setSelectedFeedIndex(newIndex);
     focusFeedItem(newIndex);
   };
@@ -318,9 +316,13 @@ export default function App() {
       else if (e.key === "ArrowUp") { e.preventDefault(); navigateFeed(-1); }
       else if (e.key === "Enter") {
         e.preventDefault();
-        const list = feeds();
         const idx = selectedFeedIndex();
-        if (list[idx]) selectFeed(list[idx], idx);
+        if (idx === 0) {
+          loadAllArticles();
+        } else {
+          const list = feeds();
+          if (list[idx - 1]) selectFeed(list[idx - 1], idx);
+        }
       }
     }
 
@@ -439,21 +441,31 @@ export default function App() {
 
           <ul
             ref={feedListRef}
-            role="list"
+            role="listbox"
             aria-label="Feed list"
+            aria-activedescendant={selectedFeed() === null ? "feed-all" : `feed-${selectedFeed()}`}
+            tabindex={-1}
           >
             <li
               id="feed-all"
-              role="listitem"
-              class="all-articles-item"
+              role="option"
+              class="all-articles-item feed-button"
+              tabindex={0}
+              aria-selected={selectedFeed() === null}
+              onClick={() => loadAllArticles()}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  navigateFeed(1);
+                }
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  loadAllArticles();
+                }
+              }}
+              onFocus={() => setSelectedFeedIndex(0)}
             >
-              <button
-                class="feed-button"
-                aria-current={selectedFeed() === null ? "true" : undefined}
-                onClick={() => loadAllArticles()}
-              >
-                <span class="feed-title">All Articles</span>
-              </button>
+              <span class="feed-title">All Articles</span>
             </li>
             <For each={feeds()}>
               {(feed, index) => {
@@ -461,32 +473,35 @@ export default function App() {
                 return (
                   <li
                     id={`feed-${feed.id}`}
-                    role="listitem"
+                    role="option"
+                    class="feed-button"
+                    tabindex={0}
+                    aria-selected={selectedFeed() === feed.id}
+                    aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
+                    onClick={() => selectFeed(feed, index() + 1)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Delete") {
+                        removeFeed(feed.id);
+                      }
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        navigateFeed(1);
+                      }
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        navigateFeed(-1);
+                      }
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        selectFeed(feed, index() + 1);
+                      }
+                    }}
+                    onFocus={() => setSelectedFeedIndex(index() + 1)}
                   >
-                    <button
-                      class="feed-button"
-                      aria-current={selectedFeed() === feed.id ? "true" : undefined}
-                      aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
-                      onClick={() => selectFeed(feed, index())}
-                      onKeyDown={(e) => {
-                        if (e.key === "Delete") {
-                          removeFeed(feed.id);
-                        }
-                        if (e.key === "ArrowDown") {
-                          e.preventDefault();
-                          navigateFeed(1);
-                        }
-                        if (e.key === "ArrowUp") {
-                          e.preventDefault();
-                          navigateFeed(-1);
-                        }
-                      }}
-                    >
-                      <span class="feed-title">{feed.title}</span>
-                      <Show when={feedUnread() > 0}>
-                        <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
-                      </Show>
-                    </button>
+                    <span class="feed-title">{feed.title}</span>
+                    <Show when={feedUnread() > 0}>
+                      <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
+                    </Show>
                   </li>
                 );
               }}
