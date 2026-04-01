@@ -847,6 +847,12 @@ fn main() -> ExitCode {
                             Err(e) => error("folders", &format!("{}", e), "Check query syntax"),
                         }
                     } else {
+                        match db.count_manual_folders() {
+                            Ok(count) if count >= 4 => {
+                                return error("folders", "Maximum 4 manual folders allowed", "Delete a folder first");
+                            }
+                            _ => {}
+                        }
                         match db.create_folder(&name, "manual", None) {
                             Ok(id) => {
                                 if let Some(ref feed_ids) = feeds {
@@ -856,7 +862,7 @@ fn main() -> ExitCode {
                                         }
                                     }
                                 }
-                                success("folders", json!({"folder_id": id, "name": name, "type": "manual"}), vec![
+                                success("folders", json!({"action": "create", "id": id, "name": name, "type": "manual"}), vec![
                                     action(&format!("rss folders articles {}", id), "View folder articles", json!({})),
                                 ])
                             }
