@@ -515,6 +515,13 @@ export default function App() {
 
     const pane = activePane();
 
+    // Close context menu on Escape (handled first, before pane navigation)
+    if (e.key === "Escape" && contextMenu()) {
+      e.preventDefault();
+      closeContextMenu();
+      return;
+    }
+
     if (e.key === "Escape") {
       e.preventDefault();
       if (pane === "reader") focusPane("articles");
@@ -596,6 +603,41 @@ export default function App() {
           const feed = feeds().find(f => f.id === parseInt(feedId));
           if (feed) selectFeed(feed, selectedFeedIndex());
         }
+      }
+      else if (e.key === "Delete") {
+        e.preventDefault();
+        const el = document.activeElement as HTMLElement;
+        const feedId = el?.dataset.feedId;
+        if (feedId) {
+          removeFeed(parseInt(feedId));
+        }
+        // TODO: delete manual folder when delete_folder command exists
+        // const folderId = el?.dataset.folderId;
+        // if (folderId) { deleteFolder(parseInt(folderId)); }
+      }
+      else if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
+        // Open context menu at current item position
+        e.preventDefault();
+        const el = document.activeElement as HTMLElement;
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          const feedId = el.dataset.feedId;
+          const folderId = el.dataset.folderId;
+          if (feedId) {
+            openContextMenu(rect.left + 20, rect.bottom, "feed", parseInt(feedId));
+          } else if (folderId) {
+            // Only manual folders get context menus
+            const folder = folders().find(f => f.id === parseInt(folderId));
+            if (folder && folder.type === "manual") {
+              openContextMenu(rect.left + 20, rect.bottom, "folder", parseInt(folderId));
+            }
+          }
+        }
+      }
+      else if (e.key === "F2") {
+        e.preventDefault();
+        // TODO: implement inline rename when rename_folder command exists
+        setStatus("Rename: not yet implemented (F2)");
       }
     }
 
