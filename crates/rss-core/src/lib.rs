@@ -26,6 +26,7 @@ pub struct Article {
     pub fetched_at: DateTime<Utc>,
     pub full_content: Option<String>,
     pub tldr: Option<String>,
+    pub tags: Option<String>,
 }
 
 pub mod parser;

@@ -120,17 +120,6 @@ impl Database {
             "ALTER TABLE articles ADD COLUMN tldr TEXT;"
         );
 
-        // Tag feedback table — tracks user/agent corrections to auto-classification
-        self.conn.execute_batch("
-            CREATE TABLE IF NOT EXISTS tag_feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                article_id INTEGER NOT NULL,
-                original_tags TEXT NOT NULL,
-                corrected_tags TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
-            );
-        ")?;
 
         // Rejected suggestions (feedback loop)
         self.conn.execute_batch("
@@ -207,7 +196,7 @@ impl Database {
     }
 
     /// Parse an Article from a row with columns:
-    /// id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
+    /// id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
     fn row_to_article(row: &rusqlite::Row) -> Result<Article, rusqlite::Error> {
         let published_str: Option<String> = row.get(7)?;
         let fetched_str: String = row.get(10)?;
@@ -227,6 +216,7 @@ impl Database {
                 .unwrap_or_else(|_| chrono::Utc::now()),
             full_content: None,
             tldr: row.get(11)?,
+            tags: row.get::<_, Option<String>>(12).ok().flatten(),
         })
     }
 
@@ -239,7 +229,7 @@ impl Database {
     }
 
     /// Search articles with a time filter. `since` is a duration string like "24h", "7d", "30d".
-    pub fn search_articles_since(&self, query: &str, since: &str, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+    pub fn search_articles_since(&self, query: &str, since: &str, limit: usize, feed_id: Option<i64>) -> Result<Vec<Article>, rusqlite::Error> {
         let hours: i64 = if since.ends_with('d') {
             since.trim_end_matches('d').parse::<i64>().unwrap_or(1) * 24
         } else if since.ends_with('h') {
@@ -249,17 +239,26 @@ impl Database {
         };
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let pattern = format!("%{}%", query);
-        let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
+        let mut sql = String::from(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
              FROM articles
-             WHERE (title LIKE ?1 OR content LIKE ?1)
-               AND (published_at >= ?2 OR published_at IS NULL)
-             ORDER BY published_at DESC
-             LIMIT ?3"
-        )?;
-        let articles = stmt.query_map(rusqlite::params![pattern, cutoff, limit as i64], |row| {
-            Self::row_to_article(row)
-        })?.collect::<Result<Vec<_>, _>>()?;
+             WHERE (title LIKE ?1 OR content LIKE ?1 OR ?1 = '%%')
+               AND (published_at >= ?2 OR published_at IS NULL)"
+        );
+        if feed_id.is_some() {
+            sql.push_str(" AND feed_id = ?4");
+        }
+        sql.push_str(" ORDER BY published_at DESC LIMIT ?3");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = if let Some(fid) = feed_id {
+            stmt.query_map(rusqlite::params![pattern, cutoff, limit as i64, fid], |row| {
+                Self::row_to_article(row)
+            })?.collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(rusqlite::params![pattern, cutoff, limit as i64], |row| {
+                Self::row_to_article(row)
+            })?.collect::<Result<Vec<_>, _>>()?
+        };
         Ok(articles)
     }
 
@@ -281,7 +280,7 @@ impl Database {
     /// Get a single article by ID
     pub fn get_article(&self, article_id: i64) -> Result<Option<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
              FROM articles WHERE id = ?1"
         )?;
         match stmt.query_row([article_id], |row| Self::row_to_article(row)) {
@@ -304,7 +303,7 @@ impl Database {
     /// List articles missing tldr
     pub fn list_articles_without_tldr(&self) -> Result<Vec<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
              FROM articles WHERE tldr IS NULL
              ORDER BY published_at DESC"
         )?;
@@ -313,7 +312,7 @@ impl Database {
     }
 
     pub fn list_articles(&self, feed_id: Option<i64>, unread_only: bool) -> Result<Vec<Article>, rusqlite::Error> {
-        let mut sql = String::from("SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr FROM articles WHERE 1=1");
+        let mut sql = String::from("SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags FROM articles WHERE 1=1");
         if let Some(fid) = feed_id {
             sql.push_str(&format!(" AND feed_id = {}", fid));
         }
@@ -332,15 +331,26 @@ impl Database {
         Ok(changed > 0)
     }
 
-    pub fn search_articles(&self, query: &str) -> Result<Vec<Article>, rusqlite::Error> {
+    pub fn search_articles(&self, query: &str, feed_id: Option<i64>) -> Result<Vec<Article>, rusqlite::Error> {
         let pattern = format!("%{}%", query);
-        let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
-             FROM articles WHERE title LIKE ?1 OR content LIKE ?1 ORDER BY published_at DESC"
-        )?;
-        let articles = stmt.query_map(rusqlite::params![pattern], |row| {
-            Self::row_to_article(row)
-        })?.collect::<Result<Vec<_>, _>>()?;
+        let mut sql = String::from(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
+             FROM articles WHERE (title LIKE ?1 OR content LIKE ?1)"
+        );
+        if feed_id.is_some() {
+            sql.push_str(" AND feed_id = ?2");
+        }
+        sql.push_str(" ORDER BY published_at DESC");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = if let Some(fid) = feed_id {
+            stmt.query_map(rusqlite::params![pattern, fid], |row| {
+                Self::row_to_article(row)
+            })?.collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(rusqlite::params![pattern], |row| {
+                Self::row_to_article(row)
+            })?.collect::<Result<Vec<_>, _>>()?
+        };
         Ok(articles)
     }
 
@@ -400,7 +410,7 @@ impl Database {
 
     pub fn list_unanalyzed_articles(&self) -> Result<Vec<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
              FROM articles WHERE analyzed = 0 AND (content IS NOT NULL OR summary IS NOT NULL)
              ORDER BY published_at DESC"
         )?;
@@ -786,7 +796,7 @@ impl Database {
     pub fn get_articles_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
         let pattern = format!("%{}%", tag);
         let sql = format!(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
              FROM articles WHERE tags LIKE ?1 ORDER BY published_at DESC LIMIT {}",
             limit
         );
@@ -805,21 +815,12 @@ impl Database {
     /// List articles without tags
     pub fn list_untagged_articles(&self) -> Result<Vec<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
              FROM articles WHERE tags = '' AND (content IS NOT NULL OR summary IS NOT NULL)
              ORDER BY published_at DESC"
         )?;
         let articles = stmt.query_map([], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
         Ok(articles)
-    }
-
-    /// Record a tag correction (for feedback loop)
-    pub fn add_tag_feedback(&self, article_id: i64, original_tags: &str, corrected_tags: &str) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "INSERT INTO tag_feedback (article_id, original_tags, corrected_tags) VALUES (?1, ?2, ?3)",
-            rusqlite::params![article_id, original_tags, corrected_tags],
-        )?;
-        Ok(())
     }
 
     /// Clear all article tags (used during reset/re-classify)
@@ -838,20 +839,84 @@ impl Database {
         )
     }
 
-    /// Count articles for each cognitive tag (returns all tag counts)
+    /// Count articles matching any of the given tags
+    pub fn count_articles_with_any_tag(&self, tags: &[&str]) -> Result<i64, rusqlite::Error> {
+        if tags.is_empty() {
+            return Ok(0);
+        }
+        let conditions: Vec<String> = tags.iter()
+            .map(|t| format!("tags LIKE '%{}%'", t))
+            .collect();
+        let sql = format!("SELECT COUNT(*) FROM articles WHERE {}", conditions.join(" OR "));
+        self.conn.query_row(&sql, [], |row| row.get(0))
+    }
+
+    /// Get articles matching any of the given tags
+    pub fn get_articles_with_any_tag(&self, tags: &[&str], limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        if tags.is_empty() {
+            return Ok(vec![]);
+        }
+        let conditions: Vec<String> = tags.iter()
+            .map(|t| format!("tags LIKE '%{}%'", t))
+            .collect();
+        let sql = format!(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
+             FROM articles WHERE {} ORDER BY published_at DESC LIMIT {}",
+            conditions.join(" OR "), limit
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt.query_map([], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    /// Count articles for each fact-based tag
     pub fn count_all_tags(&self) -> Result<Vec<(String, i64)>, rusqlite::Error> {
         let mut results = Vec::new();
-        for tag in &["新知", "动态", "深度", "行动"] {
+        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images"] {
             let count = self.count_articles_by_tag(tag)?;
-            results.push((tag.to_string(), count));
+            if count > 0 {
+                results.push((tag.to_string(), count));
+            }
         }
-        // Unclassified count
-        let unclassified: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM articles WHERE tags = '' AND (content IS NOT NULL OR summary IS NOT NULL)",
+        // Unannotated count
+        let unannotated: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM articles WHERE tags = '' OR tags IS NULL",
             [],
             |row| row.get(0),
         )?;
-        results.push(("未分类".to_string(), unclassified));
+        if unannotated > 0 {
+            results.push(("unannotated".to_string(), unannotated));
+        }
+        Ok(results)
+    }
+
+    /// Per-tag engagement stats for harness tuning diagnostics
+    /// Returns: Vec<(tag, total, read, starred, deep_read)>
+    pub fn tag_engagement_stats(&self) -> Result<Vec<(String, i64, i64, i64, i64)>, rusqlite::Error> {
+        let mut results = Vec::new();
+        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images"] {
+            let pattern = format!("%{}%", tag);
+            let row: (i64, i64, i64, i64) = self.conn.query_row(
+                "SELECT COUNT(*), SUM(is_read), SUM(is_starred),
+                        SUM(CASE WHEN full_content IS NOT NULL THEN 1 ELSE 0 END)
+                 FROM articles WHERE tags LIKE ?1 AND published_at > datetime('now', '-30 days')",
+                rusqlite::params![pattern],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1).unwrap_or(0),
+                           row.get::<_, i64>(2).unwrap_or(0), row.get::<_, i64>(3).unwrap_or(0))),
+            )?;
+            results.push((tag.to_string(), row.0, row.1, row.2, row.3));
+        }
+        // Unclassified engagement
+        let row: (i64, i64, i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), SUM(is_read), SUM(is_starred),
+                    SUM(CASE WHEN full_content IS NOT NULL THEN 1 ELSE 0 END)
+             FROM articles WHERE tags = '' AND published_at > datetime('now', '-30 days')
+             AND (content IS NOT NULL OR summary IS NOT NULL)",
+            [],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1).unwrap_or(0),
+                       row.get::<_, i64>(2).unwrap_or(0), row.get::<_, i64>(3).unwrap_or(0))),
+        )?;
+        results.push(("未分类".to_string(), row.0, row.1, row.2, row.3));
         Ok(results)
     }
 
