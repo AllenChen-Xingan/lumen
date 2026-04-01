@@ -196,7 +196,7 @@ ul[role="listbox"] li {
 }
 
 /* Article items in feed */
-article.article-item {
+.article-item {
   padding: 8px 12px;
   cursor: pointer;
   display: flex;
@@ -205,11 +205,11 @@ article.article-item {
   border-bottom: 1px solid var(--border);
 }
 
-article.article-item:hover {
+.article-item:hover {
   background: var(--hover);
 }
 
-article.article-item:focus-visible {
+.article-item:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -282,7 +282,7 @@ article.article-item:focus-visible {
 }
 
 input:focus-visible,
-[role="feed"]:focus-visible {
+[role="listbox"]:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -345,23 +345,25 @@ input:focus-visible,
   border-bottom: 2px solid var(--border);
 }
 
-/* Feeds footer (Import/Export) */
-.feeds-footer {
-  display: flex;
-  gap: 4px;
-  padding: 8px;
-  border-top: 1px solid var(--border);
-  margin-top: auto;
+/* OPML actions inside feed management panel */
+.feed-management {
+  border-bottom: 1px solid var(--border);
 }
 
-.feeds-footer button {
+.opml-actions {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px 8px;
+}
+
+.opml-actions button {
   flex: 1;
   font-size: 0.75rem;
   padding: 3px 6px;
   opacity: 0.7;
 }
 
-.feeds-footer button:hover {
+.opml-actions button:hover {
   opacity: 1;
 }
 
@@ -400,13 +402,13 @@ input:focus-visible,
   }
 
   .feed-button:focus-visible,
-  article.article-item:focus-visible {
+  .article-item:focus-visible {
     outline: 3px solid Highlight;
     outline-offset: -2px;
   }
 
   input:focus-visible,
-  [role="feed"]:focus-visible {
+  [role="listbox"]:focus-visible {
     outline: 3px solid Highlight;
     outline-offset: -2px;
   }

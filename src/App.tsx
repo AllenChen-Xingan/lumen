@@ -53,7 +53,7 @@ export default function App() {
   };
 
   const focusArticleItem = (index: number) => {
-    const items = articleListRef?.querySelectorAll<HTMLElement>('[role="article"]');
+    const items = articleListRef?.querySelectorAll<HTMLElement>('[role="option"]');
     if (items && items[index]) {
       items[index].focus();
     }
@@ -412,31 +412,37 @@ export default function App() {
           </div>
 
           <Show when={showAddFeed()}>
-            <form
-              class="add-feed-form"
-              onSubmit={(e) => { e.preventDefault(); addFeed(); }}
-              aria-label="Add new feed"
-            >
-              <label for="feed-url" class="sr-only">Feed URL</label>
-              <input
-                id="feed-url"
-                type="url"
-                placeholder="Paste feed URL, then Enter"
-                value={feedUrl()}
-                onInput={(e) => setFeedUrl(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setShowAddFeed(false);
-                    setFeedUrl("");
-                  }
-                }}
-                aria-label="Feed URL"
-              />
-              <button type="submit" aria-label="Confirm add feed">OK</button>
-              <button type="button" onClick={() => { setShowAddFeed(false); setFeedUrl(""); }} aria-label="Cancel">
-                Cancel
-              </button>
-            </form>
+            <div class="feed-management" aria-label="Feed management">
+              <form
+                class="add-feed-form"
+                onSubmit={(e) => { e.preventDefault(); addFeed(); }}
+                aria-label="Add new feed"
+              >
+                <label for="feed-url" class="sr-only">Feed URL</label>
+                <input
+                  id="feed-url"
+                  type="url"
+                  placeholder="Paste feed URL, then Enter"
+                  value={feedUrl()}
+                  onInput={(e) => setFeedUrl(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setShowAddFeed(false);
+                      setFeedUrl("");
+                    }
+                  }}
+                  aria-label="Feed URL"
+                />
+                <button type="submit" aria-label="Confirm add feed">OK</button>
+                <button type="button" onClick={() => { setShowAddFeed(false); setFeedUrl(""); }} aria-label="Cancel">
+                  Cancel
+                </button>
+              </form>
+              <div class="opml-actions">
+                <button onClick={importOpml} aria-label="Import feeds from OPML file">Import OPML</button>
+                <button onClick={exportOpml} aria-label="Export feeds as OPML file">Export OPML</button>
+              </div>
+            </div>
           </Show>
 
           <ul
@@ -507,10 +513,6 @@ export default function App() {
               }}
             </For>
           </ul>
-          <div class="feeds-footer">
-            <button onClick={importOpml} aria-label="Import feeds from OPML file">Import</button>
-            <button onClick={exportOpml} aria-label="Export feeds as OPML file">Export</button>
-          </div>
         </nav>
 
         {/* Articles pane */}
@@ -539,20 +541,18 @@ export default function App() {
           </div>
           <div
             ref={articleListRef}
-            role="feed"
+            role="listbox"
             aria-label="Articles"
-            aria-busy="false"
+            tabindex={-1}
           >
             <For each={articles()}>
               {(article, index) => {
                 const titleId = `article-title-${article.id}`;
                 return (
-                  <article
+                  <div
                     id={`article-${article.id}`}
-                    role="article"
-                    aria-posinset={index() + 1}
-                    aria-setsize={articles().length}
-                    aria-labelledby={titleId}
+                    role="option"
+                    aria-selected={selectedArticle()?.id === article.id}
                     aria-label={`${article.title}, ${article.is_read ? "read" : "unread"}${article.is_starred ? ", starred" : ""}`}
                     tabindex={0}
                     class={`article-item ${article.is_read ? "read" : "unread"}`}
@@ -583,7 +583,7 @@ export default function App() {
                       {article.is_starred ? "\u2605" : ""}
                     </span>
                     <span id={titleId} class="article-title">{article.title}</span>
-                  </article>
+                  </div>
                 );
               }}
             </For>
