@@ -41,6 +41,30 @@ impl Database {
         let _ = self.conn.execute_batch(
             "ALTER TABLE articles ADD COLUMN full_content TEXT;"
         );
+        // Migration: add guid column + unique constraint for dedup
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN guid TEXT NOT NULL DEFAULT '';"
+        );
+        // Backfill: set guid from url (or id) for existing rows that have empty guid
+        let _ = self.conn.execute_batch(
+            "UPDATE articles SET guid = COALESCE(NULLIF(url, ''), 'id:' || id) WHERE guid = '';"
+        );
+        // Dedup: keep the oldest article (lowest id) for each (feed_id, guid) pair
+        let _ = self.conn.execute_batch(
+            "DELETE FROM articles WHERE id NOT IN (
+                SELECT MIN(id) FROM articles GROUP BY feed_id, guid
+            );"
+        );
+        // Dedup by URL: same feed + same url = same article (handles guid changes on republish)
+        let _ = self.conn.execute_batch(
+            "DELETE FROM articles WHERE url IS NOT NULL AND id NOT IN (
+                SELECT MIN(id) FROM articles WHERE url IS NOT NULL GROUP BY feed_id, url
+            );"
+        );
+        // Now safe to create unique index
+        let _ = self.conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_feed_guid ON articles(feed_id, guid);"
+        );
 
         // Entities table
         self.conn.execute_batch("
@@ -134,10 +158,11 @@ impl Database {
         let mut count = 0;
         for article in articles {
             let result = self.conn.execute(
-                "INSERT OR IGNORE INTO articles (feed_id, title, url, content, summary, published_at, is_read, is_starred, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR IGNORE INTO articles (feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     feed_id,
+                    article.guid,
                     article.title,
                     article.url,
                     article.content,
@@ -154,7 +179,7 @@ impl Database {
     }
 
     pub fn list_articles(&self, feed_id: Option<i64>, unread_only: bool) -> Result<Vec<Article>, rusqlite::Error> {
-        let mut sql = String::from("SELECT id, feed_id, title, url, content, summary, published_at, is_read, is_starred, fetched_at FROM articles WHERE 1=1");
+        let mut sql = String::from("SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at FROM articles WHERE 1=1");
         if let Some(fid) = feed_id {
             sql.push_str(&format!(" AND feed_id = {}", fid));
         }
@@ -165,18 +190,19 @@ impl Database {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let articles = stmt.query_map([], |row| {
-            let published_str: Option<String> = row.get(6)?;
-            let fetched_str: String = row.get(9)?;
+            let published_str: Option<String> = row.get(7)?;
+            let fetched_str: String = row.get(10)?;
             Ok(Article {
                 id: row.get(0)?,
                 feed_id: row.get(1)?,
-                title: row.get(2)?,
-                url: row.get(3)?,
-                content: row.get(4)?,
-                summary: row.get(5)?,
+                guid: row.get(2)?,
+                title: row.get(3)?,
+                url: row.get(4)?,
+                content: row.get(5)?,
+                summary: row.get(6)?,
                 published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
-                is_read: { let v: i32 = row.get(7)?; v != 0 },
-                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                is_read: { let v: i32 = row.get(8)?; v != 0 },
+                is_starred: { let v: i32 = row.get(9)?; v != 0 },
                 fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
@@ -194,22 +220,23 @@ impl Database {
     pub fn search_articles(&self, query: &str) -> Result<Vec<Article>, rusqlite::Error> {
         let pattern = format!("%{}%", query);
         let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, title, url, content, summary, published_at, is_read, is_starred, fetched_at
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at
              FROM articles WHERE title LIKE ?1 OR content LIKE ?1 ORDER BY published_at DESC"
         )?;
         let articles = stmt.query_map(rusqlite::params![pattern], |row| {
-            let published_str: Option<String> = row.get(6)?;
-            let fetched_str: String = row.get(9)?;
+            let published_str: Option<String> = row.get(7)?;
+            let fetched_str: String = row.get(10)?;
             Ok(Article {
                 id: row.get(0)?,
                 feed_id: row.get(1)?,
-                title: row.get(2)?,
-                url: row.get(3)?,
-                content: row.get(4)?,
-                summary: row.get(5)?,
+                guid: row.get(2)?,
+                title: row.get(3)?,
+                url: row.get(4)?,
+                content: row.get(5)?,
+                summary: row.get(6)?,
                 published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
-                is_read: { let v: i32 = row.get(7)?; v != 0 },
-                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                is_read: { let v: i32 = row.get(8)?; v != 0 },
+                is_starred: { let v: i32 = row.get(9)?; v != 0 },
                 fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
@@ -275,23 +302,24 @@ impl Database {
 
     pub fn list_unanalyzed_articles(&self) -> Result<Vec<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, feed_id, title, url, content, summary, published_at, is_read, is_starred, fetched_at
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at
              FROM articles WHERE analyzed = 0 AND (content IS NOT NULL OR summary IS NOT NULL)
              ORDER BY published_at DESC"
         )?;
         let articles = stmt.query_map([], |row| {
-            let published_str: Option<String> = row.get(6)?;
-            let fetched_str: String = row.get(9)?;
+            let published_str: Option<String> = row.get(7)?;
+            let fetched_str: String = row.get(10)?;
             Ok(Article {
                 id: row.get(0)?,
                 feed_id: row.get(1)?,
-                title: row.get(2)?,
-                url: row.get(3)?,
-                content: row.get(4)?,
-                summary: row.get(5)?,
+                guid: row.get(2)?,
+                title: row.get(3)?,
+                url: row.get(4)?,
+                content: row.get(5)?,
+                summary: row.get(6)?,
                 published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
-                is_read: { let v: i32 = row.get(7)?; v != 0 },
-                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                is_read: { let v: i32 = row.get(8)?; v != 0 },
+                is_starred: { let v: i32 = row.get(9)?; v != 0 },
                 fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
@@ -416,7 +444,7 @@ impl Database {
 
     pub fn get_smart_folder_articles(&self, query: &str, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
         let mut sql = String::from(
-            "SELECT DISTINCT a.id, a.feed_id, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
+            "SELECT DISTINCT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
              FROM articles a JOIN entities e ON a.id = e.article_id WHERE 1=1"
         );
         for part in query.split(" AND ") {
@@ -434,18 +462,19 @@ impl Database {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let articles = stmt.query_map([], |row| {
-            let published_str: Option<String> = row.get(6)?;
-            let fetched_str: String = row.get(9)?;
+            let published_str: Option<String> = row.get(7)?;
+            let fetched_str: String = row.get(10)?;
             Ok(Article {
                 id: row.get(0)?,
                 feed_id: row.get(1)?,
-                title: row.get(2)?,
-                url: row.get(3)?,
-                content: row.get(4)?,
-                summary: row.get(5)?,
+                guid: row.get(2)?,
+                title: row.get(3)?,
+                url: row.get(4)?,
+                content: row.get(5)?,
+                summary: row.get(6)?,
                 published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
-                is_read: { let v: i32 = row.get(7)?; v != 0 },
-                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                is_read: { let v: i32 = row.get(8)?; v != 0 },
+                is_starred: { let v: i32 = row.get(9)?; v != 0 },
                 fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
@@ -606,23 +635,24 @@ impl Database {
 
     pub fn get_folder_feed_articles(&self, folder_id: i64, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT a.id, a.feed_id, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
+            "SELECT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
              FROM articles a JOIN folder_feeds ff ON a.feed_id = ff.feed_id
              WHERE ff.folder_id = ?1 ORDER BY a.published_at DESC LIMIT {}", limit
         ))?;
         let articles = stmt.query_map([folder_id], |row| {
-            let published_str: Option<String> = row.get(6)?;
-            let fetched_str: String = row.get(9)?;
+            let published_str: Option<String> = row.get(7)?;
+            let fetched_str: String = row.get(10)?;
             Ok(Article {
                 id: row.get(0)?,
                 feed_id: row.get(1)?,
-                title: row.get(2)?,
-                url: row.get(3)?,
-                content: row.get(4)?,
-                summary: row.get(5)?,
+                guid: row.get(2)?,
+                title: row.get(3)?,
+                url: row.get(4)?,
+                content: row.get(5)?,
+                summary: row.get(6)?,
                 published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
-                is_read: { let v: i32 = row.get(7)?; v != 0 },
-                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                is_read: { let v: i32 = row.get(8)?; v != 0 },
+                is_starred: { let v: i32 = row.get(9)?; v != 0 },
                 fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),

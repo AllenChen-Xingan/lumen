@@ -15,6 +15,7 @@ pub struct Feed {
 pub struct Article {
     pub id: i64,
     pub feed_id: i64,
+    pub guid: String,
     pub title: String,
     pub url: Option<String>,
     pub content: Option<String>,
