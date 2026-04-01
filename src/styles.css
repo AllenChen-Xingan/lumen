@@ -7,7 +7,8 @@
   --read: #666;
   --pane-bg: #fff;
   --hover: #f0f0f0;
-  --focus: #0066cc;
+  --focus: #005fcc;
+  --focus-ring: #005fcc;
   --star: #d4a017;
 }
 
@@ -21,6 +22,8 @@
     --read: #888;
     --pane-bg: #222;
     --hover: #2a2a2a;
+    --focus: #4da6ff;
+    --focus-ring: #4da6ff;
     --star: #ffd700;
   }
 }
@@ -142,7 +145,7 @@ button:hover {
 }
 
 button:focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -169,7 +172,7 @@ li[role="option"][aria-selected="true"] {
 }
 
 li[role="option"]:focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 3px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -198,11 +201,7 @@ li[role="option"]:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
-.reader-pane h1 {
-  font-size: 1.4rem;
-  line-height: 1.3;
-  margin-bottom: 8px;
-}
+/* h1 is sr-only app title; article title uses h3 */
 
 .article-meta {
   display: flex;
@@ -217,7 +216,7 @@ li[role="option"]:focus-visible {
 }
 
 .article-meta a:focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -246,6 +245,52 @@ li[role="option"]:focus-visible {
 
 input:focus-visible,
 [role="listbox"]:focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 3px solid var(--focus-ring);
   outline-offset: -2px;
+}
+
+/* Skip navigation link */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 8px;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  border-radius: 3px;
+  font-size: 0.9rem;
+  z-index: 1000;
+}
+
+.skip-link:focus {
+  top: 8px;
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Unread count badge */
+.unread-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* Reader pane focus style */
+.reader-pane:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: -3px;
+}
+
+/* Reader heading - use h3 styling same as previous h1 */
+.reader-pane h3 {
+  font-size: 1.4rem;
+  line-height: 1.3;
+  margin-bottom: 8px;
 }

@@ -26,21 +26,21 @@ fully accessible with NVDA screen reader. Architecture: Rust CLI core + Tauri + 
 - [x] CLI: `fetch`, `articles`, `read <id>`, `mark-read <id>`, `star <id>`
 - [x] E2E test: fetch real RSS feed -> articles stored -> readable
 
-### Sprint 3: Tauri Bridge + Minimal UI [CURRENT]
-- [ ] Tauri IPC commands wrapping core functions
-- [ ] Three-pane Solid.js layout
-- [ ] ARIA landmarks (nav, complementary, main)
+### Sprint 3: Tauri Bridge + Minimal UI [DONE]
+- [x] Tauri IPC commands wrapping core functions
+- [x] Three-pane Solid.js layout
+- [x] ARIA landmarks (nav, complementary, main)
 - [ ] E2E test: app launches -> feeds display -> articles render
 
-### Sprint 4: Reading Experience + NVDA
-- [ ] Article HTML rendering
-- [ ] Read/unread/star state management
-- [ ] Keyboard navigation (j/k/Enter/Esc/Tab)
-- [ ] ARIA live regions for state changes
-- [ ] Focus management across panes
+### Sprint 4: Reading Experience + NVDA [DONE]
+- [x] Article HTML rendering
+- [x] Read/unread/star state management
+- [x] Keyboard navigation (j/k/Enter/Esc/Tab/h/n/p)
+- [x] ARIA live regions for state changes
+- [x] Focus management across panes
 - [ ] E2E test: keyboard-only full workflow + ARIA audit
 
-### Sprint 5: Polish
+### Sprint 5: Polish [CURRENT]
 - [ ] OPML import/export
 - [ ] Full-text search
 - [ ] Auto-refresh interval

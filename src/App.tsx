@@ -1,4 +1,4 @@
-import { createSignal, createEffect, For, Show, onMount } from "solid-js";
+import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 
 interface Feed {
@@ -27,10 +27,46 @@ export default function App() {
   const [feeds, setFeeds] = createSignal<Feed[]>([]);
   const [articles, setArticles] = createSignal<Article[]>([]);
   const [selectedFeed, setSelectedFeed] = createSignal<number | null>(null);
+  const [selectedFeedIndex, setSelectedFeedIndex] = createSignal(0);
   const [selectedArticle, setSelectedArticle] = createSignal<Article | null>(null);
+  const [selectedArticleIndex, setSelectedArticleIndex] = createSignal(0);
   const [feedUrl, setFeedUrl] = createSignal("");
   const [status, setStatus] = createSignal("");
   const [activePane, setActivePane] = createSignal<"feeds" | "articles" | "reader">("feeds");
+  const [articleAnnouncement, setArticleAnnouncement] = createSignal("");
+
+  let feedListRef: HTMLUListElement | undefined;
+  let articleListRef: HTMLUListElement | undefined;
+  let readerRef: HTMLElement | undefined;
+
+  const unreadCount = () => articles().filter((a) => !a.is_read).length;
+
+  const focusFeedItem = (index: number) => {
+    const items = feedListRef?.querySelectorAll<HTMLElement>('[role="option"]');
+    if (items && items[index]) {
+      items[index].focus();
+    }
+  };
+
+  const focusArticleItem = (index: number) => {
+    const items = articleListRef?.querySelectorAll<HTMLElement>('[role="option"]');
+    if (items && items[index]) {
+      items[index].focus();
+    }
+  };
+
+  const focusPane = (pane: "feeds" | "articles" | "reader") => {
+    setActivePane(pane);
+    requestAnimationFrame(() => {
+      if (pane === "feeds") {
+        focusFeedItem(selectedFeedIndex());
+      } else if (pane === "articles") {
+        focusArticleItem(selectedArticleIndex());
+      } else if (pane === "reader" && readerRef) {
+        readerRef.focus();
+      }
+    });
+  };
 
   const loadFeeds = async () => {
     try {
@@ -48,6 +84,9 @@ export default function App() {
         unreadOnly: false,
       });
       setArticles(result);
+      const total = result.length;
+      const unread = result.filter((a) => !a.is_read).length;
+      setStatus(`${total} articles, ${unread} unread`);
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
@@ -94,22 +133,30 @@ export default function App() {
     }
   };
 
-  const selectFeed = async (feed: Feed) => {
+  const selectFeed = async (feed: Feed, index?: number) => {
     setSelectedFeed(feed.id);
+    if (index !== undefined) setSelectedFeedIndex(index);
     setSelectedArticle(null);
+    setSelectedArticleIndex(0);
     setActivePane("articles");
     await loadArticles(feed.id);
+    requestAnimationFrame(() => focusArticleItem(0));
   };
 
-  const selectArticle = async (article: Article) => {
+  const selectArticle = async (article: Article, index?: number) => {
     setSelectedArticle(article);
+    if (index !== undefined) setSelectedArticleIndex(index);
     setActivePane("reader");
+    setArticleAnnouncement(
+      `${article.title}, ${article.is_read ? "read" : "unread"}`
+    );
     if (!article.is_read) {
       await invoke("mark_read", { id: article.id });
       setArticles((prev) =>
         prev.map((a) => (a.id === article.id ? { ...a, is_read: true } : a))
       );
     }
+    requestAnimationFrame(() => readerRef?.focus());
   };
 
   const toggleStar = async (id: number) => {
@@ -123,19 +170,104 @@ export default function App() {
     }
   };
 
-  // Keyboard navigation
+  const navigateArticle = (delta: number) => {
+    const list = articles();
+    if (!list.length) return;
+    const newIndex = Math.max(0, Math.min(list.length - 1, selectedArticleIndex() + delta));
+    setSelectedArticleIndex(newIndex);
+    focusArticleItem(newIndex);
+  };
+
+  const navigateUnread = (direction: "next" | "prev") => {
+    const list = articles();
+    const current = selectedArticleIndex();
+    if (direction === "next") {
+      for (let i = current + 1; i < list.length; i++) {
+        if (!list[i].is_read) { setSelectedArticleIndex(i); focusArticleItem(i); return; }
+      }
+    } else {
+      for (let i = current - 1; i >= 0; i--) {
+        if (!list[i].is_read) { setSelectedArticleIndex(i); focusArticleItem(i); return; }
+      }
+    }
+  };
+
+  const navigateFeed = (delta: number) => {
+    const list = feeds();
+    if (!list.length) return;
+    const newIndex = Math.max(0, Math.min(list.length - 1, selectedFeedIndex() + delta));
+    setSelectedFeedIndex(newIndex);
+    focusFeedItem(newIndex);
+  };
+
+  // Global keyboard navigation
   const handleKeyDown = (e: KeyboardEvent) => {
+    const tag = document.activeElement?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+
     const pane = activePane();
 
     if (e.key === "Escape") {
-      if (pane === "reader") setActivePane("articles");
-      else if (pane === "articles") setActivePane("feeds");
+      e.preventDefault();
+      if (pane === "reader") focusPane("articles");
+      else if (pane === "articles") focusPane("feeds");
       return;
     }
 
-    if (e.key === "r" && !e.ctrlKey && !e.metaKey && document.activeElement?.tagName !== "INPUT") {
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (pane === "feeds") focusPane("articles");
+      else if (pane === "articles") focusPane("reader");
+      else focusPane("feeds");
+      return;
+    }
+    if (e.key === "Tab" && e.shiftKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (pane === "reader") focusPane("articles");
+      else if (pane === "articles") focusPane("feeds");
+      else focusPane("reader");
+      return;
+    }
+
+    if (e.key === "h") {
+      focusPane("feeds");
+      return;
+    }
+
+    if (e.key === "r" && !e.ctrlKey && !e.metaKey) {
       fetchAll();
       return;
+    }
+
+    if (pane === "feeds") {
+      if (e.key === "ArrowDown") { e.preventDefault(); navigateFeed(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); navigateFeed(-1); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        const list = feeds();
+        const idx = selectedFeedIndex();
+        if (list[idx]) selectFeed(list[idx], idx);
+      }
+    }
+
+    if (pane === "articles") {
+      if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); navigateArticle(1); }
+      else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); navigateArticle(-1); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        const list = articles();
+        const idx = selectedArticleIndex();
+        if (list[idx]) selectArticle(list[idx], idx);
+      }
+      else if (e.key === "n") { navigateUnread("next"); }
+      else if (e.key === "p") { navigateUnread("prev"); }
+    }
+
+    if (pane === "reader") {
+      if (e.key === "j") { e.preventDefault(); navigateArticle(1); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
+      else if (e.key === "k") { e.preventDefault(); navigateArticle(-1); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
+      else if (e.key === "n") { navigateUnread("next"); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
+      else if (e.key === "p") { navigateUnread("prev"); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
     }
   };
 
@@ -144,8 +276,23 @@ export default function App() {
     document.addEventListener("keydown", handleKeyDown);
   });
 
+  onCleanup(() => {
+    document.removeEventListener("keydown", handleKeyDown);
+  });
+
   return (
     <div class="app" role="application" aria-label="RSS Reader">
+      {/* Visually hidden app heading for screen readers */}
+      <h1 class="sr-only">RSS Reader</h1>
+
+      {/* Skip navigation link */}
+      <a href="#reader-pane" class="skip-link">Skip to main content</a>
+
+      {/* Live region for article announcements */}
+      <div class="sr-only" aria-live="assertive" aria-atomic="true">
+        {articleAnnouncement()}
+      </div>
+
       {/* Status bar */}
       <div class="status-bar" role="status" aria-live="polite" aria-atomic="true">
         {status()}
@@ -179,59 +326,94 @@ export default function App() {
             <button type="submit">Add</button>
           </form>
 
-          <ul role="listbox" aria-label="Feed list" tabindex="0">
+          <ul
+            ref={feedListRef}
+            role="listbox"
+            aria-label="Feed list"
+            tabindex="0"
+            aria-activedescendant={selectedFeed() ? `feed-${selectedFeed()}` : undefined}
+          >
             <For each={feeds()}>
-              {(feed) => (
-                <li
-                  role="option"
-                  aria-selected={selectedFeed() === feed.id}
-                  tabindex={selectedFeed() === feed.id ? 0 : -1}
-                  onClick={() => selectFeed(feed)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      selectFeed(feed);
-                    }
-                    if (e.key === "Delete") {
-                      removeFeed(feed.id);
-                    }
-                  }}
-                >
-                  <span class="feed-title">{feed.title}</span>
-                </li>
-              )}
+              {(feed, index) => {
+                const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
+                return (
+                  <li
+                    id={`feed-${feed.id}`}
+                    role="option"
+                    aria-selected={selectedFeed() === feed.id}
+                    aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
+                    tabindex={selectedFeedIndex() === index() ? 0 : -1}
+                    onClick={() => selectFeed(feed, index())}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        selectFeed(feed, index());
+                      }
+                      if (e.key === "Delete") {
+                        removeFeed(feed.id);
+                      }
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        navigateFeed(1);
+                      }
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        navigateFeed(-1);
+                      }
+                    }}
+                  >
+                    <span class="feed-title">{feed.title}</span>
+                    <Show when={feedUnread() > 0}>
+                      <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
+                    </Show>
+                  </li>
+                );
+              }}
             </For>
           </ul>
         </nav>
 
         {/* Articles pane */}
-        <section class="pane articles-pane" role="complementary" aria-label="Article list">
+        <section
+          class="pane articles-pane"
+          role="complementary"
+          aria-label="Article list"
+        >
           <div class="pane-header">
             <h2>Articles</h2>
           </div>
-          <ul role="listbox" aria-label="Articles" tabindex="0">
+          <ul
+            ref={articleListRef}
+            role="listbox"
+            aria-roledescription="article list"
+            aria-label="Articles"
+            tabindex="0"
+            aria-activedescendant={selectedArticle() ? `article-${selectedArticle()!.id}` : undefined}
+          >
             <For each={articles()}>
-              {(article) => (
+              {(article, index) => (
                 <li
+                  id={`article-${article.id}`}
                   role="option"
-                  aria-selected={selectedArticle()?.id === article.id}
-                  tabindex={selectedArticle()?.id === article.id ? 0 : -1}
+                  aria-selected={selectedArticleIndex() === index()}
+                  aria-label={`${article.title}, ${article.is_read ? "read" : "unread"}${article.is_starred ? ", starred" : ""}`}
+                  tabindex={selectedArticleIndex() === index() ? 0 : -1}
                   class={article.is_read ? "read" : "unread"}
-                  onClick={() => selectArticle(article)}
+                  onClick={() => selectArticle(article, index())}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      selectArticle(article);
+                      selectArticle(article, index());
                     }
                     if (e.key === "s") {
                       toggleStar(article.id);
                     }
                   }}
                 >
-                  <span class="article-status" aria-label={article.is_read ? "Read" : "Unread"}>
+                  <span class="article-status" aria-hidden="true">
                     {article.is_read ? " " : "\u25CF"}
                   </span>
-                  <span class="article-star" aria-label={article.is_starred ? "Starred" : ""}>
+                  <span class="article-star" aria-hidden="true">
                     {article.is_starred ? "\u2605" : ""}
                   </span>
                   <span class="article-title">{article.title}</span>
@@ -242,7 +424,13 @@ export default function App() {
         </section>
 
         {/* Reader pane */}
-        <main class="pane reader-pane" aria-label="Article reader">
+        <main
+          id="reader-pane"
+          class="pane reader-pane"
+          aria-label="Article reader"
+          ref={readerRef}
+          tabindex="-1"
+        >
           <Show
             when={selectedArticle()}
             fallback={
@@ -254,7 +442,7 @@ export default function App() {
             {(article) => (
               <article aria-label={article().title}>
                 <header>
-                  <h1>{article().title}</h1>
+                  <h3>{article().title}</h3>
                   <div class="article-meta">
                     <Show when={article().url}>
                       {(url) => (
