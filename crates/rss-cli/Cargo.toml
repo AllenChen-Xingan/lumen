@@ -8,5 +8,7 @@ clap = { version = "4", features = ["derive"] }
 rss-core = { path = "../rss-core" }
 rss-store = { path = "../rss-store" }
 rss-fetch = { path = "../rss-fetch" }
+rss-extract = { path = "../rss-extract" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"

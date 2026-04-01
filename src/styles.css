@@ -258,6 +258,11 @@ ul[role="listbox"] li {
   outline-offset: 2px;
 }
 
+.error-text {
+  color: #c00;
+  font-size: 0.8rem;
+}
+
 .article-content {
   font-size: 1rem;
   line-height: 1.7;
