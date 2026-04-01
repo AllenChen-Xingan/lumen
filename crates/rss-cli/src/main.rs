@@ -36,6 +36,9 @@ enum Commands {
 }
 
 fn db_path() -> String {
+    if let Ok(path) = std::env::var("RSS_DB_PATH") {
+        return path;
+    }
     let dir = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let app_dir = dir.join("rss-reader");
     std::fs::create_dir_all(&app_dir).ok();

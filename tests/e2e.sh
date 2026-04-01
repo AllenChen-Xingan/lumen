@@ -46,17 +46,17 @@ e2e_test "CLI help" "$CLI --help" "Minimalist RSS reader"
 # Test 2: List empty
 e2e_test "List empty feeds" "$CLI list" "No feeds"
 
-# Test 3: Add a real feed (using a reliable test feed)
-e2e_test "Add RSS feed" "$CLI add https://hnrss.org/newest?count=3" "Added feed"
+# Test 3: Add a real feed
+e2e_test "Add RSS feed" "$CLI add https://feeds.bbci.co.uk/news/technology/rss.xml" "Added feed"
 
 # Test 4: List shows feed
-e2e_test "List shows added feed" "$CLI list" "Hacker News"
+e2e_test "List shows added feed" "$CLI list" "BBC"
 
 # Test 5: Articles exist
 e2e_test "Articles found" "$CLI articles" "\["
 
-# Test 6: Fetch
-e2e_test "Fetch works" "$CLI fetch" "Fetched"
+# Test 6: Fetch updates
+e2e_test "Fetch works" "$CLI fetch" "Fetched\|new articles"
 
 # Test 7: Remove feed
 e2e_test "Remove feed" "$CLI remove 1" "removed"

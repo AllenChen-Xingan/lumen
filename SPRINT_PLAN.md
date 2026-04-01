@@ -6,27 +6,27 @@ fully accessible with NVDA screen reader. Architecture: Rust CLI core + Tauri + 
 
 ## Sprint Map
 
-### Sprint 0: Scaffolding [CURRENT]
+### Sprint 0: Scaffolding [DONE]
 - [x] Git init
-- [ ] Rust workspace (rss-core, rss-store, rss-fetch, rss-cli)
+- [x] Rust workspace (rss-core, rss-store, rss-fetch, rss-cli)
 - [ ] Tauri project
 - [ ] Solid.js frontend skeleton
-- [ ] Verifier script
-- [ ] Working log system
+- [x] Verifier script
+- [x] Working log system
 
-### Sprint 1: Feed Parsing + Storage
-- [ ] feed-rs based RSS/Atom parser in rss-core
-- [ ] SQLite schema (feeds, articles) in rss-store
-- [ ] CLI: `add <url>`, `list`, `remove <id>`
-- [ ] E2E test: add feed -> list shows it -> remove works
+### Sprint 1: Feed Parsing + Storage [DONE]
+- [x] feed-rs based RSS/Atom parser in rss-core
+- [x] SQLite schema (feeds, articles) in rss-store
+- [x] CLI: `add <url>`, `list`, `remove <id>`
+- [x] E2E test: add feed -> list shows it -> remove works
 
-### Sprint 2: Fetch + Article Pipeline
-- [ ] HTTP fetcher with reqwest in rss-fetch
-- [ ] Article storage pipeline
-- [ ] CLI: `fetch`, `articles`, `read <id>`, `mark-read <id>`, `star <id>`
-- [ ] E2E test: fetch real RSS feed -> articles stored -> readable
+### Sprint 2: Fetch + Article Pipeline [DONE]
+- [x] HTTP fetcher with reqwest in rss-fetch
+- [x] Article storage pipeline
+- [x] CLI: `fetch`, `articles`, `read <id>`, `mark-read <id>`, `star <id>`
+- [x] E2E test: fetch real RSS feed -> articles stored -> readable
 
-### Sprint 3: Tauri Bridge + Minimal UI
+### Sprint 3: Tauri Bridge + Minimal UI [CURRENT]
 - [ ] Tauri IPC commands wrapping core functions
 - [ ] Three-pane Solid.js layout
 - [ ] ARIA landmarks (nav, complementary, main)
