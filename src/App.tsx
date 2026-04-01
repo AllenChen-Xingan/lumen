@@ -71,6 +71,59 @@ export default function App() {
   const smartFolders = () => folders().filter(f => f.type === "smart");
   const manualFolders = () => folders().filter(f => f.type === "manual");
 
+  // Smart folder suggest/reset state
+  interface Suggestion { index: number; name: string; related_entities?: string; article_count: number; query: string; }
+  const [suggestions, setSuggestions] = createSignal<Suggestion[]>([]);
+  const [showSuggestions, setShowSuggestions] = createSignal(false);
+  const [showResetInput, setShowResetInput] = createSignal(false);
+  const [resetReason, setResetReason] = createSignal("");
+  const [suggestLoading, setSuggestLoading] = createSignal(false);
+
+  const triggerSuggest = async () => {
+    setSuggestLoading(true);
+    setStatus("Analyzing feeds for smart folder suggestions...");
+    try {
+      const result = await invoke<Suggestion[]>("suggest_folders");
+      setSuggestions(result);
+      setShowSuggestions(true);
+      setStatus(`${result.length} smart folder suggestions ready`);
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    } finally {
+      setSuggestLoading(false);
+    }
+  };
+
+  const acceptSuggestions = async (exceptIndices?: number[]) => {
+    try {
+      const except = exceptIndices?.join(",") || undefined;
+      await invoke("accept_folders", { except });
+      setShowSuggestions(false);
+      setSuggestions([]);
+      await loadFolders();
+      setStatus("Smart folders created!");
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
+  };
+
+  const resetSmartFolders = async () => {
+    const reason = resetReason().trim();
+    if (!reason) return;
+    setStatus("Resetting smart folders...");
+    try {
+      const result = await invoke<{ new_suggestions: Suggestion[]; deleted: number }>("reset_folders", { reason });
+      setSuggestions(result.new_suggestions || []);
+      setShowSuggestions(result.new_suggestions?.length > 0);
+      setShowResetInput(false);
+      setResetReason("");
+      await loadFolders();
+      setStatus(`Reset ${result.deleted} folders. ${result.new_suggestions?.length || 0} new suggestions.`);
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
+  };
+
   const toggleSection = (section: string) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
   };
@@ -819,48 +872,109 @@ export default function App() {
             </li>
 
             {/* Smart Folders section */}
-            <Show when={smartFolders().length > 0}>
-              <li
-                role="treeitem"
-                aria-expanded={isSectionExpanded("smart-folders")}
-                data-section="smart-folders"
-                class="section-header feed-button"
-                tabindex={-1}
-                onClick={() => toggleSection("smart-folders")}
-              >
-                <span class="section-toggle" aria-hidden="true">
-                  {isSectionExpanded("smart-folders") ? "\u25BE" : "\u25B8"}
-                </span>
-                <span class="feed-title">Smart Folders</span>
-              </li>
-              <Show when={isSectionExpanded("smart-folders")}>
-                <li role="none">
-                  <ul role="group">
-                    <For each={smartFolders()}>
-                      {(folder) => (
-                        <li
-                          role="treeitem"
-                          class="feed-button tree-child"
-                          tabindex={-1}
-                          aria-selected={selectedFolder() === folder.id}
-                          aria-label={`${folder.name} smart folder`}
-                          data-folder-id={folder.id}
-                          onClick={() => selectFolder(folder)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              selectFolder(folder);
-                            }
-                          }}
-                        >
-                          <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC1"}</span>
-                          <span class="feed-title">{folder.name}</span>
+            <li
+              role="treeitem"
+              aria-expanded={isSectionExpanded("smart-folders")}
+              data-section="smart-folders"
+              class="section-header feed-button"
+              tabindex={-1}
+              onClick={() => toggleSection("smart-folders")}
+            >
+              <span class="section-toggle" aria-hidden="true">
+                {isSectionExpanded("smart-folders") ? "\u25BE" : "\u25B8"}
+              </span>
+              <span class="feed-title">Smart Folders</span>
+            </li>
+            <Show when={isSectionExpanded("smart-folders")}>
+              <li role="none">
+                <ul role="group">
+                  {/* Existing smart folders */}
+                  <For each={smartFolders()}>
+                    {(folder) => (
+                      <li
+                        role="treeitem"
+                        class="feed-button tree-child"
+                        tabindex={-1}
+                        aria-selected={selectedFolder() === folder.id}
+                        aria-label={`${folder.name} smart folder`}
+                        data-folder-id={folder.id}
+                        onClick={() => selectFolder(folder)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            selectFolder(folder);
+                          }
+                        }}
+                      >
+                        <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC1"}</span>
+                        <span class="feed-title">{folder.name}</span>
+                      </li>
+                    )}
+                  </For>
+
+                  {/* Suggest / Reset actions */}
+                  <li role="none" class="smart-folder-actions">
+                    <Show when={smartFolders().length === 0 && !showSuggestions()}>
+                      <button
+                        class="sf-action-btn"
+                        onClick={triggerSuggest}
+                        disabled={suggestLoading()}
+                        aria-label="Suggest smart folders"
+                      >
+                        {suggestLoading() ? "Analyzing..." : "Suggest"}
+                      </button>
+                    </Show>
+                    <Show when={smartFolders().length > 0}>
+                      <button
+                        class="sf-action-btn"
+                        onClick={() => setShowResetInput(!showResetInput())}
+                        aria-label="Reset smart folders"
+                      >
+                        Reset
+                      </button>
+                    </Show>
+                  </li>
+
+                  {/* Reset reason input */}
+                  <Show when={showResetInput()}>
+                    <li role="none" class="smart-folder-reset">
+                      <form onSubmit={(e) => { e.preventDefault(); resetSmartFolders(); }}>
+                        <label for="reset-reason" class="sr-only">Why reset?</label>
+                        <input
+                          id="reset-reason"
+                          type="text"
+                          placeholder="What's wrong? e.g. too generic"
+                          value={resetReason()}
+                          onInput={(e) => setResetReason(e.currentTarget.value)}
+                          onKeyDown={(e) => { if (e.key === "Escape") { setShowResetInput(false); setResetReason(""); } }}
+                          aria-label="Reset reason"
+                        />
+                        <button type="submit" disabled={!resetReason().trim()}>Go</button>
+                      </form>
+                    </li>
+                  </Show>
+
+                  {/* Suggestion preview */}
+                  <Show when={showSuggestions() && suggestions().length > 0}>
+                    <For each={suggestions()}>
+                      {(s) => (
+                        <li role="treeitem" class="feed-button tree-child suggestion-item" tabindex={-1}>
+                          <span class="feed-title">{s.name}</span>
+                          <span class="unread-badge" aria-label={`${s.article_count} articles`}>{s.article_count}</span>
                         </li>
                       )}
                     </For>
-                  </ul>
-                </li>
-              </Show>
+                    <li role="none" class="smart-folder-actions">
+                      <button class="sf-action-btn sf-accept" onClick={() => acceptSuggestions()} aria-label="Accept all suggestions">
+                        Accept All
+                      </button>
+                      <button class="sf-action-btn" onClick={() => { setShowSuggestions(false); setSuggestions([]); }} aria-label="Dismiss suggestions">
+                        Dismiss
+                      </button>
+                    </li>
+                  </Show>
+                </ul>
+              </li>
             </Show>
 
             {/* Feeds section */}

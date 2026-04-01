@@ -452,6 +452,49 @@ input:focus-visible,
   outline: none;
 }
 
+/* Smart folder actions */
+.smart-folder-actions {
+  padding: 4px 8px 4px 24px;
+  display: flex;
+  gap: 4px;
+}
+.sf-action-btn {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  background: var(--pane-bg);
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.sf-action-btn:hover { background: var(--hover); }
+.sf-action-btn:disabled { opacity: 0.5; cursor: default; }
+.sf-accept { background: var(--accent); color: #fff; border-color: var(--accent); }
+.sf-accept:hover { opacity: 0.9; }
+
+.smart-folder-reset {
+  padding: 4px 8px 4px 24px;
+}
+.smart-folder-reset form {
+  display: flex;
+  gap: 4px;
+}
+.smart-folder-reset input {
+  flex: 1;
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.smart-folder-reset button {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+}
+.suggestion-item {
+  opacity: 0.7;
+  font-style: italic;
+}
+
 /* Windows High Contrast mode support */
 @media (forced-colors: active) {
   button {
