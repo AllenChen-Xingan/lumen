@@ -1,0 +1,11 @@
+[package]
+name = "rss-ner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+serde = { version = "1", features = ["derive"] }
+dirs = "5"
+reqwest = { version = "0.12", features = ["blocking"] }

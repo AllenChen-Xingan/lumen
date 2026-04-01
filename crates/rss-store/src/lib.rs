@@ -41,6 +41,45 @@ impl Database {
         let _ = self.conn.execute_batch(
             "ALTER TABLE articles ADD COLUMN full_content TEXT;"
         );
+
+        // Entities table
+        self.conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                article_id INTEGER NOT NULL,
+                context TEXT,
+                score REAL,
+                FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+            CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+            CREATE INDEX IF NOT EXISTS idx_entities_article ON entities(article_id);
+        ")?;
+
+        // Folders table
+        self.conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                folder_type TEXT NOT NULL DEFAULT 'manual',
+                query TEXT
+            );
+            CREATE TABLE IF NOT EXISTS folder_feeds (
+                folder_id INTEGER NOT NULL,
+                feed_id INTEGER NOT NULL,
+                PRIMARY KEY (folder_id, feed_id),
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE,
+                FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE
+            );
+        ")?;
+
+        // Track which articles have been analyzed
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN analyzed INTEGER NOT NULL DEFAULT 0;"
+        );
+
         Ok(())
     }
 
@@ -199,5 +238,208 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    // ── Entity methods ──
+
+    pub fn add_entities(&self, article_id: i64, entities: &[(String, String, Option<String>, f32)]) -> Result<usize, rusqlite::Error> {
+        let mut count = 0;
+        for (name, entity_type, context, score) in entities {
+            self.conn.execute(
+                "INSERT INTO entities (name, entity_type, article_id, context, score) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![name, entity_type, article_id, context, *score as f64],
+            )?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub fn mark_analyzed(&self, article_id: i64) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute("UPDATE articles SET analyzed = 1 WHERE id = ?1", [article_id])?;
+        Ok(changed > 0)
+    }
+
+    pub fn list_unanalyzed_articles(&self) -> Result<Vec<Article>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, feed_id, title, url, content, summary, published_at, is_read, is_starred, fetched_at
+             FROM articles WHERE analyzed = 0 AND (content IS NOT NULL OR summary IS NOT NULL)
+             ORDER BY published_at DESC"
+        )?;
+        let articles = stmt.query_map([], |row| {
+            let published_str: Option<String> = row.get(6)?;
+            let fetched_str: String = row.get(9)?;
+            Ok(Article {
+                id: row.get(0)?,
+                feed_id: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+                content: row.get(4)?,
+                summary: row.get(5)?,
+                published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+                is_read: { let v: i32 = row.get(7)?; v != 0 },
+                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                full_content: None,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    pub fn list_entities_grouped(&self, entity_type: Option<&str>, name_filter: Option<&str>, limit: usize) -> Result<Vec<(String, String, i64, f64)>, rusqlite::Error> {
+        let mut sql = String::from(
+            "SELECT name, entity_type, COUNT(*) as cnt, AVG(score) as avg_score FROM entities WHERE 1=1"
+        );
+        if let Some(t) = entity_type {
+            sql.push_str(&format!(" AND entity_type = '{}'", t.replace('\'', "''")));
+        }
+        if let Some(n) = name_filter {
+            sql.push_str(&format!(" AND name LIKE '%{}%'", n.replace('\'', "''")));
+        }
+        sql.push_str(&format!(" GROUP BY name, entity_type ORDER BY cnt DESC LIMIT {}", limit));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let results = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    pub fn get_entity_mentions(&self, name: &str) -> Result<Vec<(i64, String, Option<String>, f64)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT article_id, entity_type, context, score FROM entities WHERE name = ?1 ORDER BY score DESC"
+        )?;
+        let results = stmt.query_map([name], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    pub fn get_related_entities(&self, name: &str, limit: usize) -> Result<Vec<(String, String, i64)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT e2.name, e2.entity_type, COUNT(*) as cnt
+             FROM entities e1 JOIN entities e2 ON e1.article_id = e2.article_id AND e1.id != e2.id
+             WHERE e1.name = ?1 GROUP BY e2.name, e2.entity_type ORDER BY cnt DESC LIMIT {}",
+            limit
+        ))?;
+        let results = stmt.query_map([name], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    // ── Folder methods ──
+
+    pub fn create_folder(&self, name: &str, folder_type: &str, query: Option<&str>) -> Result<i64, rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO folders (name, folder_type, query) VALUES (?1, ?2, ?3)",
+            rusqlite::params![name, folder_type, query],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_folders(&self) -> Result<Vec<(i64, String, String, Option<String>)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT id, name, folder_type, query FROM folders ORDER BY name")?;
+        let results = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    pub fn remove_folder(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute("DELETE FROM folders WHERE id = ?1", [id])?;
+        Ok(changed > 0)
+    }
+
+    pub fn add_feed_to_folder(&self, folder_id: i64, feed_id: i64) -> Result<bool, rusqlite::Error> {
+        let result = self.conn.execute(
+            "INSERT OR IGNORE INTO folder_feeds (folder_id, feed_id) VALUES (?1, ?2)",
+            rusqlite::params![folder_id, feed_id],
+        );
+        Ok(result.map(|n| n > 0).unwrap_or(false))
+    }
+
+    pub fn get_smart_folder_articles(&self, query: &str, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        let mut sql = String::from(
+            "SELECT DISTINCT a.id, a.feed_id, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
+             FROM articles a JOIN entities e ON a.id = e.article_id WHERE 1=1"
+        );
+        for part in query.split(" AND ") {
+            let part = part.trim();
+            if let Some(t) = part.strip_prefix("type:") {
+                sql.push_str(&format!(" AND e.entity_type = '{}'", t.replace('\'', "''")));
+            } else if let Some(n) = part.strip_prefix("name:") {
+                let pattern = n.replace('*', "%").replace('\'', "''");
+                sql.push_str(&format!(" AND e.name LIKE '{}'", pattern));
+            } else {
+                sql.push_str(&format!(" AND e.name LIKE '%{}%'", part.replace('\'', "''")));
+            }
+        }
+        sql.push_str(&format!(" ORDER BY a.published_at DESC LIMIT {}", limit));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt.query_map([], |row| {
+            let published_str: Option<String> = row.get(6)?;
+            let fetched_str: String = row.get(9)?;
+            Ok(Article {
+                id: row.get(0)?,
+                feed_id: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+                content: row.get(4)?,
+                summary: row.get(5)?,
+                published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+                is_read: { let v: i32 = row.get(7)?; v != 0 },
+                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                full_content: None,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    pub fn get_folder_feed_articles(&self, folder_id: i64, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT a.id, a.feed_id, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
+             FROM articles a JOIN folder_feeds ff ON a.feed_id = ff.feed_id
+             WHERE ff.folder_id = ?1 ORDER BY a.published_at DESC LIMIT {}", limit
+        ))?;
+        let articles = stmt.query_map([folder_id], |row| {
+            let published_str: Option<String> = row.get(6)?;
+            let fetched_str: String = row.get(9)?;
+            Ok(Article {
+                id: row.get(0)?,
+                feed_id: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+                content: row.get(4)?,
+                summary: row.get(5)?,
+                published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+                is_read: { let v: i32 = row.get(7)?; v != 0 },
+                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                full_content: None,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
     }
 }

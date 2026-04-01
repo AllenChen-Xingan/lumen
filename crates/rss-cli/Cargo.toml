@@ -9,6 +9,8 @@ rss-core = { path = "../rss-core" }
 rss-store = { path = "../rss-store" }
 rss-fetch = { path = "../rss-fetch" }
 rss-extract = { path = "../rss-extract" }
+rss-ner = { path = "../rss-ner" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = "0.4"
 dirs = "5"

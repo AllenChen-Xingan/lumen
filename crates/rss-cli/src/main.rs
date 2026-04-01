@@ -6,6 +6,8 @@ use rss_store::Database;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::process::ExitCode;
+use rss_ner;
+use chrono;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -58,6 +60,53 @@ enum Commands {
     },
     /// Fetch full-text content for an article (cached)
     FetchFullText { id: i64 },
+    /// Analyze articles with NER (extract entities)
+    Analyze {
+        #[arg(long)]
+        article: Option<i64>,
+        #[arg(long)]
+        download_model: bool,
+    },
+    /// Query extracted entities
+    Entities {
+        #[arg(long)]
+        entity_type: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        related: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        count: usize,
+    },
+    /// Manage folders
+    Folders {
+        #[command(subcommand)]
+        action: Option<FolderAction>,
+    },
+    /// Output unread articles + entity context for LLM pipe
+    ReadForMe {
+        #[arg(long, default_value = "24h")]
+        since: String,
+        #[arg(long, default_value_t = 100)]
+        count: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum FolderAction {
+    Create {
+        name: String,
+        #[arg(long)]
+        smart: Option<String>,
+        #[arg(long)]
+        feeds: Option<String>,
+    },
+    Remove { id: i64 },
+    Articles {
+        id: i64,
+        #[arg(long, default_value_t = 30)]
+        count: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +267,37 @@ fn describe_commands() -> Value {
                 "description": "Fetch and cache full-text content for an article",
                 "args": [
                     {"name": "id", "type": "integer", "required": true, "description": "Article ID"}
+                ]
+            },
+            {
+                "name": "analyze",
+                "description": "Run NER on articles to extract entities (person, org, concept)",
+                "args": [
+                    {"name": "--article", "type": "integer", "required": false, "description": "Analyze one article"},
+                    {"name": "--download-model", "type": "boolean", "required": false, "description": "Download NER model (~16MB)"}
+                ]
+            },
+            {
+                "name": "entities",
+                "description": "Query extracted entities",
+                "args": [
+                    {"name": "--entity-type", "type": "string", "required": false, "description": "Filter: person, organization, concept"},
+                    {"name": "--name", "type": "string", "required": false, "description": "Search by entity name"},
+                    {"name": "--related", "type": "string", "required": false, "description": "Find co-occurring entities"},
+                    {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"}
+                ]
+            },
+            {
+                "name": "folders",
+                "description": "Manage folders (list, create, remove, articles)",
+                "args": []
+            },
+            {
+                "name": "read-for-me",
+                "description": "Output unread articles + entity context for LLM pipe",
+                "args": [
+                    {"name": "--since", "type": "string", "required": false, "description": "Time window (default 24h, e.g. 7d)"},
+                    {"name": "--count", "type": "integer", "required": false, "description": "Max articles (default 100)"}
                 ]
             }
         ]
@@ -597,6 +677,253 @@ fn main() -> ExitCode {
                     ])
                 }
                 Err(e) => error("fetch-full-text", &format!("Extraction failed: {}", e), &format!("Try opening {} in a browser", url)),
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // ANALYZE
+        // ---------------------------------------------------------------
+        Commands::Analyze { article, download_model } => {
+            if download_model {
+                match rss_ner::download_model() {
+                    Ok(()) => return success("analyze", json!({"model_downloaded": true}), vec![
+                        action("rss analyze", "Run NER on unanalyzed articles", json!({})),
+                    ]),
+                    Err(e) => return error("analyze", &format!("Download failed: {}", e), "Check network connection"),
+                }
+            }
+
+            let articles_to_analyze = match article {
+                Some(id) => {
+                    match db.list_articles(None, false) {
+                        Ok(all) => all.into_iter().filter(|a| a.id == id).collect::<Vec<_>>(),
+                        Err(e) => return error("analyze", &format!("{}", e), "Check article ID"),
+                    }
+                }
+                None => {
+                    match db.list_unanalyzed_articles() {
+                        Ok(a) => a,
+                        Err(e) => return error("analyze", &format!("{}", e), "Check database"),
+                    }
+                }
+            };
+
+            let total = articles_to_analyze.len();
+            let mut total_entities = 0;
+
+            for a in &articles_to_analyze {
+                let text = a.full_content.as_deref()
+                    .or(a.content.as_deref())
+                    .or(a.summary.as_deref())
+                    .unwrap_or(&a.title);
+
+                let entities = rss_ner::extract_entities(text);
+                let db_entities: Vec<(String, String, Option<String>, f32)> = entities.iter()
+                    .map(|e| (e.name.clone(), e.entity_type.clone(), None, e.score))
+                    .collect();
+
+                db.add_entities(a.id, &db_entities).ok();
+                db.mark_analyzed(a.id).ok();
+                total_entities += entities.len();
+            }
+
+            success("analyze", json!({
+                "articles_analyzed": total,
+                "entities_found": total_entities,
+            }), vec![
+                action("rss entities", "View extracted entities", json!({})),
+                action("rss entities --entity-type concept", "View concepts", json!({})),
+                action("rss entities --entity-type organization", "View organizations", json!({})),
+            ])
+        }
+
+        // ---------------------------------------------------------------
+        // ENTITIES
+        // ---------------------------------------------------------------
+        Commands::Entities { entity_type, name, related, count } => {
+            if let Some(ref rel) = related {
+                match db.get_related_entities(rel, count) {
+                    Ok(results) => {
+                        let items: Vec<Value> = results.iter()
+                            .map(|(n, t, c)| json!({"name": n, "entity_type": t, "co_occurrences": c}))
+                            .collect();
+                        success("entities", json!({"related_to": rel, "entities": items, "count": items.len()}), vec![])
+                    }
+                    Err(e) => error("entities", &format!("{}", e), "Check entity name"),
+                }
+            } else if let Some(ref n) = name {
+                if entity_type.is_none() {
+                    match db.get_entity_mentions(n) {
+                        Ok(mentions) => {
+                            let items: Vec<Value> = mentions.iter()
+                                .map(|(aid, t, ctx, s)| json!({"article_id": aid, "entity_type": t, "context": ctx, "score": s}))
+                                .collect();
+                            success("entities", json!({"name": n, "mentions": items, "count": items.len()}), vec![])
+                        }
+                        Err(e) => error("entities", &format!("{}", e), "Check entity name"),
+                    }
+                } else {
+                    match db.list_entities_grouped(entity_type.as_deref(), Some(n), count) {
+                        Ok(results) => {
+                            let items: Vec<Value> = results.iter()
+                                .map(|(n, t, c, s)| json!({"name": n, "entity_type": t, "mentions": c, "avg_score": s}))
+                                .collect();
+                            success("entities", json!({"entities": items, "count": items.len()}), vec![])
+                        }
+                        Err(e) => error("entities", &format!("{}", e), "Run `rss analyze` first"),
+                    }
+                }
+            } else {
+                match db.list_entities_grouped(entity_type.as_deref(), None, count) {
+                    Ok(results) => {
+                        let items: Vec<Value> = results.iter()
+                            .map(|(n, t, c, s)| json!({"name": n, "entity_type": t, "mentions": c, "avg_score": s}))
+                            .collect();
+                        success("entities", json!({"entities": items, "count": items.len()}), vec![
+                            action("rss analyze", "Analyze more articles", json!({})),
+                        ])
+                    }
+                    Err(e) => error("entities", &format!("{}", e), "Run `rss analyze` first"),
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // FOLDERS
+        // ---------------------------------------------------------------
+        Commands::Folders { action: folder_action } => {
+            match folder_action {
+                None => {
+                    match db.list_folders() {
+                        Ok(folders) => {
+                            let items: Vec<Value> = folders.iter()
+                                .map(|(id, name, ftype, query)| json!({"id": id, "name": name, "type": ftype, "query": query}))
+                                .collect();
+                            success("folders", json!({"folders": items, "count": items.len()}), vec![
+                                action("rss folders create <name> --smart <query>", "Create smart folder", json!({})),
+                                action("rss folders create <name> --feeds 1,2,3", "Create manual folder", json!({})),
+                            ])
+                        }
+                        Err(e) => error("folders", &format!("{}", e), "Check database"),
+                    }
+                }
+                Some(FolderAction::Create { name, smart, feeds }) => {
+                    if let Some(ref query) = smart {
+                        match db.create_folder(&name, "smart", Some(query)) {
+                            Ok(id) => success("folders", json!({"folder_id": id, "name": name, "type": "smart", "query": query}), vec![
+                                action(&format!("rss folders articles {}", id), "View folder articles", json!({})),
+                            ]),
+                            Err(e) => error("folders", &format!("{}", e), "Check query syntax"),
+                        }
+                    } else {
+                        match db.create_folder(&name, "manual", None) {
+                            Ok(id) => {
+                                if let Some(ref feed_ids) = feeds {
+                                    for fid_str in feed_ids.split(',') {
+                                        if let Ok(fid) = fid_str.trim().parse::<i64>() {
+                                            db.add_feed_to_folder(id, fid).ok();
+                                        }
+                                    }
+                                }
+                                success("folders", json!({"folder_id": id, "name": name, "type": "manual"}), vec![
+                                    action(&format!("rss folders articles {}", id), "View folder articles", json!({})),
+                                ])
+                            }
+                            Err(e) => error("folders", &format!("{}", e), "Check parameters"),
+                        }
+                    }
+                }
+                Some(FolderAction::Remove { id }) => {
+                    match db.remove_folder(id) {
+                        Ok(true) => success("folders", json!({"removed": id}), vec![
+                            action("rss folders", "List remaining folders", json!({})),
+                        ]),
+                        Ok(false) => error("folders", &format!("Folder {} not found", id), "Use `rss folders` to see IDs"),
+                        Err(e) => error("folders", &format!("{}", e), "Check folder ID"),
+                    }
+                }
+                Some(FolderAction::Articles { id, count }) => {
+                    match db.list_folders() {
+                        Ok(folders) => {
+                            if let Some((_, _, ftype, query)) = folders.iter().find(|(fid, _, _, _)| *fid == id) {
+                                let articles = if ftype == "smart" {
+                                    db.get_smart_folder_articles(query.as_deref().unwrap_or(""), count)
+                                } else {
+                                    db.get_folder_feed_articles(id, count)
+                                };
+                                match articles {
+                                    Ok(arts) => {
+                                        let items: Vec<Value> = arts.iter()
+                                            .map(|a| serde_json::to_value(a).unwrap())
+                                            .collect();
+                                        success("folders", json!({"folder_id": id, "articles": items, "count": items.len()}), vec![])
+                                    }
+                                    Err(e) => error("folders", &format!("{}", e), "Check folder query"),
+                                }
+                            } else {
+                                error("folders", &format!("Folder {} not found", id), "Use `rss folders` to see IDs")
+                            }
+                        }
+                        Err(e) => error("folders", &format!("{}", e), "Check database"),
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // READ-FOR-ME
+        // ---------------------------------------------------------------
+        Commands::ReadForMe { since, count } => {
+            let hours: i64 = if since.ends_with('d') {
+                since.trim_end_matches('d').parse::<i64>().unwrap_or(1) * 24
+            } else if since.ends_with('h') {
+                since.trim_end_matches('h').parse::<i64>().unwrap_or(24)
+            } else {
+                24
+            };
+
+            match db.list_articles(None, true) {
+                Ok(articles) => {
+                    let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours);
+                    let recent: Vec<&rss_core::Article> = articles.iter()
+                        .filter(|a| a.published_at.map(|d| d > cutoff).unwrap_or(true))
+                        .take(count)
+                        .collect();
+
+                    let entity_summary = db.list_entities_grouped(None, None, 20).unwrap_or_default();
+                    let entity_items: Vec<Value> = entity_summary.iter()
+                        .map(|(n, t, c, s)| json!({"name": n, "type": t, "mentions": c, "score": s}))
+                        .collect();
+
+                    let article_items: Vec<Value> = recent.iter().map(|a| {
+                        let content = a.content.as_deref().or(a.summary.as_deref()).unwrap_or("");
+                        let snippet = if content.len() > 500 { &content[..500] } else { content };
+                        let clean = rss_ner::strip_html(snippet);
+                        json!({
+                            "id": a.id,
+                            "title": a.title,
+                            "feed_id": a.feed_id,
+                            "url": a.url,
+                            "published_at": a.published_at.map(|d| d.to_rfc3339()),
+                            "snippet": clean,
+                            "is_starred": a.is_starred,
+                        })
+                    }).collect();
+
+                    success("read-for-me", json!({
+                        "period": since,
+                        "unread_count": recent.len(),
+                        "total_unread": articles.len(),
+                        "articles": article_items,
+                        "top_entities": entity_items,
+                        "hint": "Pipe to `claude` or any LLM for intelligent filtering",
+                    }), vec![
+                        action("rss read-for-me | claude \"pick the 5 most important\"", "AI filtering", json!({})),
+                        action("rss read-for-me | claude \"group by topic, highlight trends\"", "Topic analysis", json!({})),
+                        action("rss analyze", "Run NER on new articles first", json!({})),
+                    ])
+                }
+                Err(e) => error("read-for-me", &format!("{}", e), "Check database"),
             }
         }
     }
