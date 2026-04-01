@@ -320,6 +320,15 @@ impl Database {
         Ok(results)
     }
 
+    /// Get entity names for a specific article
+    pub fn get_article_entities(&self, article_id: i64) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT name FROM entities WHERE article_id = ?1 ORDER BY score DESC"
+        )?;
+        let results = stmt.query_map([article_id], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
     pub fn get_entity_mentions(&self, name: &str) -> Result<Vec<(i64, String, Option<String>, f64)>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT article_id, entity_type, context, score FROM entities WHERE name = ?1 ORDER BY score DESC"
