@@ -161,30 +161,41 @@ ul {
   list-style: none;
 }
 
-ul[role="listbox"] li {
+ul[role="listbox"] li,
+ul[role="tree"] li,
+ul[role="group"] li {
   padding: 0;
 }
 
-/* Smart folders section */
-.folders-section {
-  border-bottom: 2px solid var(--border);
-}
-
-.section-label {
-  font-size: 0.7rem;
+/* Treeview section headers */
+.section-header {
+  font-weight: 600;
+  font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--read);
-  padding: 6px 12px 2px;
+  border-bottom: 1px solid var(--border);
 }
 
-.folder-list {
-  list-style: none;
+.section-toggle {
+  width: 14px;
+  font-size: 0.7rem;
+  display: inline-block;
+}
+
+/* Tree child items — indented */
+.tree-child {
+  padding-left: 24px;
 }
 
 .folder-icon {
   font-size: 0.85rem;
   width: 18px;
+}
+
+/* Group styling */
+ul[role="group"] {
+  list-style: none;
 }
 
 /* Feed list items */
@@ -309,7 +320,8 @@ ul[role="listbox"] li {
 }
 
 input:focus-visible,
-[role="listbox"]:focus-visible {
+[role="listbox"]:focus-visible,
+[role="tree"]:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -435,7 +447,8 @@ input:focus-visible,
   }
 
   input:focus-visible,
-  [role="listbox"]:focus-visible {
+  [role="listbox"]:focus-visible,
+  [role="tree"]:focus-visible {
     outline: 3px solid Highlight;
     outline-offset: -2px;
   }

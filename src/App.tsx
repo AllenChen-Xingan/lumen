@@ -51,14 +51,47 @@ export default function App() {
   const [folders, setFolders] = createSignal<Folder[]>([]);
   const [selectedFolder, setSelectedFolder] = createSignal<number | null>(null);
 
+  const [expandedSections, setExpandedSections] = createSignal<Record<string, boolean>>({
+    "smart-folders": true,
+    "feeds": true,
+  });
+
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLDivElement | undefined;
   let readerRef: HTMLElement | undefined;
 
   const unreadCount = () => articles().filter((a) => !a.is_read).length;
 
+  const smartFolders = () => folders().filter(f => f.type === "smart");
+  const manualFolders = () => folders().filter(f => f.type === "manual");
+
+  const toggleSection = (section: string) => {
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  };
+
+  const isSectionExpanded = (section: string) => expandedSections()[section] !== false;
+
+  // Get all visible treeitem elements for keyboard navigation
+  const getVisibleTreeItems = (): HTMLElement[] => {
+    if (!feedListRef) return [];
+    return Array.from(feedListRef.querySelectorAll<HTMLElement>('[role="treeitem"]')).filter(el => {
+      // An item is visible if none of its ancestor groups are collapsed
+      let parent = el.parentElement;
+      while (parent && parent !== feedListRef) {
+        if (parent.getAttribute("role") === "group") {
+          const parentItem = parent.parentElement;
+          if (parentItem?.getAttribute("aria-expanded") === "false") {
+            return false;
+          }
+        }
+        parent = parent.parentElement;
+      }
+      return true;
+    });
+  };
+
   const focusFeedItem = (index: number) => {
-    const items = feedListRef?.querySelectorAll<HTMLElement>('[role="option"]');
+    const items = getVisibleTreeItems();
     if (items && items[index]) {
       items[index].focus();
     }
@@ -353,12 +386,17 @@ export default function App() {
     }
   };
 
-  // Feed index: 0 = "All Articles", 1+ = feeds()[i-1]
+  // Navigate visible tree items
   const navigateFeed = (delta: number) => {
-    const totalItems = feeds().length + 1; // +1 for "All Articles"
-    const newIndex = Math.max(0, Math.min(totalItems - 1, selectedFeedIndex() + delta));
+    const items = getVisibleTreeItems();
+    const totalItems = items.length;
+    if (totalItems === 0) return;
+    const current = document.activeElement as HTMLElement;
+    const currentIdx = items.indexOf(current);
+    const baseIdx = currentIdx >= 0 ? currentIdx : selectedFeedIndex();
+    const newIndex = Math.max(0, Math.min(totalItems - 1, baseIdx + delta));
     setSelectedFeedIndex(newIndex);
-    focusFeedItem(newIndex);
+    items[newIndex]?.focus();
   };
 
   // Global keyboard navigation
@@ -393,14 +431,61 @@ export default function App() {
     if (pane === "feeds") {
       if (e.key === "ArrowDown") { e.preventDefault(); navigateFeed(1); }
       else if (e.key === "ArrowUp") { e.preventDefault(); navigateFeed(-1); }
+      else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        const el = document.activeElement as HTMLElement;
+        const expanded = el?.getAttribute("aria-expanded");
+        if (expanded === "false") {
+          // Expand this section
+          const sectionId = el?.dataset.section;
+          if (sectionId) toggleSection(sectionId);
+        } else if (expanded === "true") {
+          // Move to first child
+          navigateFeed(1);
+        }
+      }
+      else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        const el = document.activeElement as HTMLElement;
+        const expanded = el?.getAttribute("aria-expanded");
+        if (expanded === "true") {
+          // Collapse this section
+          const sectionId = el?.dataset.section;
+          if (sectionId) toggleSection(sectionId);
+        } else {
+          // Move to parent treeitem
+          const group = el?.closest('[role="group"]');
+          if (group) {
+            const parentItem = group.parentElement as HTMLElement;
+            if (parentItem?.getAttribute("role") === "treeitem") {
+              const items = getVisibleTreeItems();
+              const idx = items.indexOf(parentItem);
+              if (idx >= 0) {
+                setSelectedFeedIndex(idx);
+                parentItem.focus();
+              }
+            }
+          }
+        }
+      }
       else if (e.key === "Enter") {
         e.preventDefault();
-        const idx = selectedFeedIndex();
-        if (idx === 0) {
+        const el = document.activeElement as HTMLElement;
+        // Check if it's a section header — toggle expand
+        if (el?.getAttribute("aria-expanded") !== null && el?.dataset.section) {
+          toggleSection(el.dataset.section);
+          return;
+        }
+        const feedId = el?.dataset.feedId;
+        const folderId = el?.dataset.folderId;
+        if (el?.id === "feed-all") {
           loadAllArticles();
-        } else {
-          const list = feeds();
-          if (list[idx - 1]) selectFeed(list[idx - 1], idx);
+        } else if (folderId) {
+          const folder = folders().find(f => f.id === parseInt(folderId));
+          if (folder) selectFolder(folder);
+        } else if (feedId) {
+          const feed = feeds().find(f => f.id === parseInt(feedId));
+          if (feed) selectFeed(feed, selectedFeedIndex());
         }
       }
     }
@@ -525,102 +610,126 @@ export default function App() {
             </div>
           </Show>
 
-          <Show when={folders().length > 0}>
-            <div class="folders-section">
-              <h3 class="section-label">Smart Folders</h3>
-              <ul role="listbox" aria-label="Smart folders" class="folder-list">
-                <For each={folders()}>
-                  {(folder) => (
-                    <li
-                      role="option"
-                      class="feed-button"
-                      tabindex={selectedFolder() === folder.id ? 0 : -1}
-                      aria-selected={selectedFolder() === folder.id}
-                      aria-label={`${folder.name} smart folder`}
-                      onClick={() => selectFolder(folder)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          selectFolder(folder);
-                        }
-                      }}
-                    >
-                      <span class="folder-icon" aria-hidden="true">📁</span>
-                      <span class="feed-title">{folder.name}</span>
-                    </li>
-                  )}
-                </For>
-              </ul>
-            </div>
-          </Show>
-
           <ul
             ref={feedListRef}
-            role="listbox"
-            aria-label="Feed list"
-            aria-activedescendant={selectedFeed() === null ? "feed-all" : `feed-${selectedFeed()}`}
+            role="tree"
+            aria-label="Feed subscriptions"
             tabindex={-1}
           >
+            {/* All Articles — top-level treeitem */}
             <li
               id="feed-all"
-              role="option"
+              role="treeitem"
               class="all-articles-item feed-button"
               tabindex={selectedFeedIndex() === 0 ? 0 : -1}
-              aria-selected={selectedFeed() === null}
+              aria-selected={selectedFeed() === null && selectedFolder() === null}
               onClick={() => loadAllArticles()}
               onKeyDown={(e) => {
-                if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  navigateFeed(1);
-                }
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   loadAllArticles();
                 }
               }}
-              onFocus={() => setSelectedFeedIndex(0)}
             >
               <span class="feed-title">All Articles</span>
             </li>
-            <For each={feeds()}>
-              {(feed, index) => {
-                const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
-                return (
-                  <li
-                    id={`feed-${feed.id}`}
-                    role="option"
-                    class="feed-button"
-                    tabindex={selectedFeedIndex() === index() + 1 ? 0 : -1}
-                    aria-selected={selectedFeed() === feed.id}
-                    aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
-                    onClick={() => selectFeed(feed, index() + 1)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Delete") {
-                        removeFeed(feed.id);
-                      }
-                      if (e.key === "ArrowDown") {
-                        e.preventDefault();
-                        navigateFeed(1);
-                      }
-                      if (e.key === "ArrowUp") {
-                        e.preventDefault();
-                        navigateFeed(-1);
-                      }
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        selectFeed(feed, index() + 1);
-                      }
+
+            {/* Smart Folders section */}
+            <Show when={smartFolders().length > 0}>
+              <li
+                role="treeitem"
+                aria-expanded={isSectionExpanded("smart-folders")}
+                data-section="smart-folders"
+                class="section-header feed-button"
+                tabindex={-1}
+                onClick={() => toggleSection("smart-folders")}
+              >
+                <span class="section-toggle" aria-hidden="true">
+                  {isSectionExpanded("smart-folders") ? "\u25BE" : "\u25B8"}
+                </span>
+                <span class="feed-title">Smart Folders</span>
+              </li>
+              <Show when={isSectionExpanded("smart-folders")}>
+                <li role="none">
+                  <ul role="group">
+                    <For each={smartFolders()}>
+                      {(folder) => (
+                        <li
+                          role="treeitem"
+                          class="feed-button tree-child"
+                          tabindex={-1}
+                          aria-selected={selectedFolder() === folder.id}
+                          aria-label={`${folder.name} smart folder`}
+                          data-folder-id={folder.id}
+                          onClick={() => selectFolder(folder)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              selectFolder(folder);
+                            }
+                          }}
+                        >
+                          <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC1"}</span>
+                          <span class="feed-title">{folder.name}</span>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </li>
+              </Show>
+            </Show>
+
+            {/* Feeds section */}
+            <li
+              role="treeitem"
+              aria-expanded={isSectionExpanded("feeds")}
+              data-section="feeds"
+              class="section-header feed-button"
+              tabindex={-1}
+              onClick={() => toggleSection("feeds")}
+            >
+              <span class="section-toggle" aria-hidden="true">
+                {isSectionExpanded("feeds") ? "\u25BE" : "\u25B8"}
+              </span>
+              <span class="feed-title">Feeds</span>
+            </li>
+            <Show when={isSectionExpanded("feeds")}>
+              <li role="none">
+                <ul role="group">
+                  <For each={feeds()}>
+                    {(feed) => {
+                      const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
+                      return (
+                        <li
+                          id={`feed-${feed.id}`}
+                          role="treeitem"
+                          class="feed-button tree-child"
+                          tabindex={-1}
+                          aria-selected={selectedFeed() === feed.id}
+                          aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
+                          data-feed-id={feed.id}
+                          onClick={() => selectFeed(feed)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Delete") {
+                              removeFeed(feed.id);
+                            }
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              selectFeed(feed);
+                            }
+                          }}
+                        >
+                          <span class="feed-title">{feed.title}</span>
+                          <Show when={feedUnread() > 0}>
+                            <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
+                          </Show>
+                        </li>
+                      );
                     }}
-                    onFocus={() => setSelectedFeedIndex(index() + 1)}
-                  >
-                    <span class="feed-title">{feed.title}</span>
-                    <Show when={feedUnread() > 0}>
-                      <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
-                    </Show>
-                  </li>
-                );
-              }}
-            </For>
+                  </For>
+                </ul>
+              </li>
+            </Show>
           </ul>
         </nav>
 
