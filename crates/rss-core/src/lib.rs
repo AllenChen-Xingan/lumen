@@ -26,3 +26,4 @@ pub struct Article {
 }
 
 pub mod parser;
+pub mod opml;

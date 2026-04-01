@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use rss_store::Database;
 use rss_core::parser::parse_feed;
+use rss_core::opml;
 use rss_fetch::fetch_feed_bytes;
 
 #[derive(Parser)]
@@ -33,6 +34,12 @@ enum Commands {
     MarkRead { id: i64 },
     /// Star/unstar an article
     Star { id: i64 },
+    /// Import feeds from OPML file
+    Import { path: String },
+    /// Export feeds as OPML to stdout
+    Export,
+    /// Search articles
+    Search { query: String },
 }
 
 fn db_path() -> String {
@@ -157,6 +164,61 @@ fn main() {
             match db.toggle_star(id) {
                 Ok(true) => println!("Toggled star on article {}.", id),
                 Ok(false) => println!("Article {} not found.", id),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        Commands::Import { path } => {
+            match std::fs::read_to_string(&path) {
+                Ok(data) => match opml::parse_opml(&data) {
+                    Ok(feeds) => {
+                        let mut added = 0;
+                        for opml_feed in &feeds {
+                            match fetch_feed_bytes(&opml_feed.xml_url) {
+                                Ok(bytes) => match parse_feed(&opml_feed.xml_url, &bytes) {
+                                    Ok((feed, articles)) => {
+                                        match db.add_feed(&feed) {
+                                            Ok(feed_id) => {
+                                                db.add_articles(feed_id, &articles).ok();
+                                                added += 1;
+                                                println!("Imported: {}", feed.title);
+                                            }
+                                            Err(e) => eprintln!("Skip {}: {}", opml_feed.title, e),
+                                        }
+                                    }
+                                    Err(e) => eprintln!("Parse error {}: {}", opml_feed.title, e),
+                                },
+                                Err(e) => eprintln!("Fetch error {}: {}", opml_feed.title, e),
+                            }
+                        }
+                        println!("Imported {} of {} feeds.", added, feeds.len());
+                    }
+                    Err(e) => eprintln!("OPML parse error: {}", e),
+                },
+                Err(e) => eprintln!("Error reading file: {}", e),
+            }
+        }
+        Commands::Export => {
+            match db.list_feeds() {
+                Ok(feeds) => {
+                    let pairs: Vec<(String, String)> = feeds.into_iter().map(|f| (f.title, f.url)).collect();
+                    print!("{}", opml::generate_opml(&pairs));
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        Commands::Search { query } => {
+            match db.search_articles(&query) {
+                Ok(articles) => {
+                    if articles.is_empty() {
+                        println!("No articles match '{}'.", query);
+                    } else {
+                        for a in articles {
+                            let status = if a.is_read { " " } else { "*" };
+                            let star = if a.is_starred { "+" } else { " " };
+                            println!("[{}]{}{} {}", a.id, status, star, a.title);
+                        }
+                    }
+                }
                 Err(e) => eprintln!("Error: {}", e),
             }
         }

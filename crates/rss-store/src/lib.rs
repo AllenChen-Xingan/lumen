@@ -133,6 +133,33 @@ impl Database {
         Ok(changed > 0)
     }
 
+    pub fn search_articles(&self, query: &str) -> Result<Vec<Article>, rusqlite::Error> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, feed_id, title, url, content, summary, published_at, is_read, is_starred, fetched_at
+             FROM articles WHERE title LIKE ?1 OR content LIKE ?1 ORDER BY published_at DESC"
+        )?;
+        let articles = stmt.query_map(rusqlite::params![pattern], |row| {
+            let published_str: Option<String> = row.get(6)?;
+            let fetched_str: String = row.get(9)?;
+            Ok(Article {
+                id: row.get(0)?,
+                feed_id: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+                content: row.get(4)?,
+                summary: row.get(5)?,
+                published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+                is_read: { let v: i32 = row.get(7)?; v != 0 },
+                is_starred: { let v: i32 = row.get(8)?; v != 0 },
+                fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
     pub fn toggle_star(&self, article_id: i64) -> Result<bool, rusqlite::Error> {
         let changed = self.conn.execute("UPDATE articles SET is_starred = NOT is_starred WHERE id = ?1", [article_id])?;
         Ok(changed > 0)

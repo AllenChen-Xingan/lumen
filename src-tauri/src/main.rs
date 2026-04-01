@@ -2,6 +2,7 @@
 
 use rss_core::{Feed, Article};
 use rss_core::parser::parse_feed;
+use rss_core::opml;
 use rss_fetch::fetch_feed_bytes;
 use rss_store::Database;
 use serde::Serialize;
@@ -80,6 +81,45 @@ fn toggle_star(id: i64, state: State<AppState>) -> Result<bool, String> {
     db.toggle_star(id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn import_opml(data: String, state: State<AppState>) -> Result<Vec<String>, String> {
+    let opml_feeds = opml::parse_opml(&data).map_err(|e| e.to_string())?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let mut results = Vec::new();
+    for opml_feed in &opml_feeds {
+        match fetch_feed_bytes(&opml_feed.xml_url) {
+            Ok(bytes) => match parse_feed(&opml_feed.xml_url, &bytes) {
+                Ok((feed, articles)) => {
+                    match db.add_feed(&feed) {
+                        Ok(feed_id) => {
+                            let count = db.add_articles(feed_id, &articles).unwrap_or(0);
+                            results.push(format!("Imported: {} ({} articles)", feed.title, count));
+                        }
+                        Err(e) => results.push(format!("Skip {}: {}", opml_feed.title, e)),
+                    }
+                }
+                Err(e) => results.push(format!("Parse error {}: {}", opml_feed.title, e)),
+            },
+            Err(e) => results.push(format!("Fetch error {}: {}", opml_feed.title, e)),
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+fn export_opml(state: State<AppState>) -> Result<String, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let feeds = db.list_feeds().map_err(|e| e.to_string())?;
+    let pairs: Vec<(String, String)> = feeds.into_iter().map(|f| (f.title, f.url)).collect();
+    Ok(opml::generate_opml(&pairs))
+}
+
+#[tauri::command]
+fn search_articles(query: String, state: State<AppState>) -> Result<Vec<Article>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.search_articles(&query).map_err(|e| e.to_string())
+}
+
 fn main() {
     let db_path = {
         let dir = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -101,6 +141,9 @@ fn main() {
             list_articles,
             mark_read,
             toggle_star,
+            import_opml,
+            export_opml,
+            search_articles,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

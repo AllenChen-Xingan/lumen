@@ -294,3 +294,71 @@ input:focus-visible,
   line-height: 1.3;
   margin-bottom: 8px;
 }
+
+/* Pane header actions */
+.pane-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Search bar */
+.search-bar {
+  display: flex;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search-bar input {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 0.85rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* Windows High Contrast mode support */
+@media (forced-colors: active) {
+  button {
+    border: 1px solid ButtonText;
+  }
+
+  button:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
+
+  li[role="option"][aria-selected="true"] {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+
+  li[role="option"]:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  input:focus-visible,
+  [role="listbox"]:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .unread-badge {
+    border: 1px solid ButtonText;
+  }
+
+  .skip-link:focus {
+    outline: 3px solid Highlight;
+  }
+
+  .reader-pane:focus-visible {
+    outline: 3px solid Highlight;
+  }
+
+  a {
+    color: LinkText;
+  }
+}

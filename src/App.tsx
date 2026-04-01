@@ -34,6 +34,7 @@ export default function App() {
   const [status, setStatus] = createSignal("");
   const [activePane, setActivePane] = createSignal<"feeds" | "articles" | "reader">("feeds");
   const [articleAnnouncement, setArticleAnnouncement] = createSignal("");
+  const [searchQuery, setSearchQuery] = createSignal("");
 
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLUListElement | undefined;
@@ -128,6 +129,57 @@ export default function App() {
       setStatus(results.join("; "));
       const fid = selectedFeed();
       await loadArticles(fid ?? undefined);
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
+  };
+
+  const searchArticles = async (query: string) => {
+    if (!query.trim()) {
+      const fid = selectedFeed();
+      await loadArticles(fid ?? undefined);
+      return;
+    }
+    try {
+      const result = await invoke<Article[]>("search_articles", { query });
+      setArticles(result);
+      setStatus(`${result.length} results for "${query}"`);
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
+  };
+
+  const importOpml = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".opml,.xml";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const data = await file.text();
+      setStatus("Importing...");
+      try {
+        const results = await invoke<string[]>("import_opml", { data });
+        setStatus(results.join("; "));
+        await loadFeeds();
+      } catch (e) {
+        setStatus(`Error: ${e}`);
+      }
+    };
+    input.click();
+  };
+
+  const exportOpml = async () => {
+    try {
+      const opml = await invoke<string>("export_opml");
+      const blob = new Blob([opml], { type: "application/xml" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "feeds.opml";
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus("Exported OPML.");
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
@@ -303,9 +355,17 @@ export default function App() {
         <nav class="pane feeds-pane" aria-label="Feed subscriptions">
           <div class="pane-header">
             <h2>Feeds</h2>
-            <button onClick={fetchAll} aria-label="Refresh all feeds">
-              Refresh
-            </button>
+            <div class="pane-actions">
+              <button onClick={importOpml} aria-label="Import feeds from OPML file">
+                Import
+              </button>
+              <button onClick={exportOpml} aria-label="Export feeds as OPML file">
+                Export
+              </button>
+              <button onClick={fetchAll} aria-label="Refresh all feeds">
+                Refresh
+              </button>
+            </div>
           </div>
 
           <form
@@ -381,6 +441,21 @@ export default function App() {
         >
           <div class="pane-header">
             <h2>Articles</h2>
+          </div>
+          <div role="search" aria-label="Search articles" class="search-bar">
+            <label for="search-input" class="sr-only">Search articles</label>
+            <input
+              id="search-input"
+              type="search"
+              placeholder="Search..."
+              value={searchQuery()}
+              onInput={(e) => {
+                const q = e.currentTarget.value;
+                setSearchQuery(q);
+                searchArticles(q);
+              }}
+              aria-label="Search articles"
+            />
           </div>
           <ul
             ref={articleListRef}
