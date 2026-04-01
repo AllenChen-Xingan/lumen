@@ -51,6 +51,7 @@ export default function App() {
   const [fullTextError, setFullTextError] = createSignal<string | null>(null);
   const [folders, setFolders] = createSignal<Folder[]>([]);
   const [selectedFolder, setSelectedFolder] = createSignal<string | null>(null);
+  const [feedBusy, setFeedBusy] = createSignal(false);
 
   const [expandedSections, setExpandedSections] = createSignal<Record<string, boolean>>({
     "smart-folders": true,
@@ -104,7 +105,7 @@ export default function App() {
   };
 
   const focusArticleItem = (index: number) => {
-    const items = articleListRef?.querySelectorAll<HTMLElement>('[role="option"]');
+    const items = articleListRef?.querySelectorAll<HTMLElement>('article');
     if (items && items[index]) {
       items[index].focus();
     }
@@ -142,6 +143,7 @@ export default function App() {
   };
 
   const loadArticles = async (feedId?: number) => {
+    setFeedBusy(true);
     try {
       const result = await invoke<Article[]>("list_articles", {
         feedId: feedId ?? null,
@@ -154,6 +156,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
+    setFeedBusy(false);
   };
 
   const addFeed = async () => {
@@ -322,6 +325,7 @@ export default function App() {
   };
 
   const fetchAll = async () => {
+    setFeedBusy(true);
     setStatus("Fetching...");
     try {
       const results = await invoke<Array<{ feed_id: number; title: string; new_articles: number; error?: string }>>("fetch_feeds");
@@ -335,6 +339,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
+    setFeedBusy(false);
   };
 
   const searchArticles = async (query: string) => {
@@ -343,6 +348,7 @@ export default function App() {
       await loadArticles(fid ?? undefined);
       return;
     }
+    setFeedBusy(true);
     try {
       const result = await invoke<Article[]>("search_articles", { query });
       setArticles(result);
@@ -350,6 +356,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
+    setFeedBusy(false);
   };
 
   const importOpml = () => {
@@ -398,6 +405,7 @@ export default function App() {
     setSelectedArticle(null);
     setSelectedArticleIndex(0);
     setActivePane("articles");
+    setFeedBusy(true);
     try {
       const result = await invoke<Article[]>("folder_articles", { tag: folderName });
       setArticles(result);
@@ -405,6 +413,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
+    setFeedBusy(false);
     requestAnimationFrame(() => focusArticleItem(0));
   };
 
@@ -641,6 +650,17 @@ export default function App() {
     if (pane === "articles") {
       if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); navigateArticle(1); }
       else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); navigateArticle(-1); }
+      else if (e.key === "PageDown") { e.preventDefault(); navigateArticle(1); }
+      else if (e.key === "PageUp") { e.preventDefault(); navigateArticle(-1); }
+      else if (e.key === "Home" && e.ctrlKey) {
+        e.preventDefault();
+        const searchInput = document.querySelector<HTMLElement>('.search-input, #search-input');
+        searchInput?.focus();
+      }
+      else if (e.key === "End" && e.ctrlKey) {
+        e.preventDefault();
+        readerRef?.focus();
+      }
       else if (e.key === "Enter") {
         e.preventDefault();
         const list = articles();
@@ -951,19 +971,21 @@ export default function App() {
           </div>
           <div
             ref={articleListRef}
-            role="listbox"
+            role="feed"
             aria-label="Articles"
-            tabindex={-1}
+            aria-busy={feedBusy()}
           >
             <For each={articles()}>
               {(article, index) => {
                 const titleId = `article-title-${article.id}`;
+                const snippetId = `article-snippet-${article.id}`;
                 return (
-                  <div
+                  <article
                     id={`article-${article.id}`}
-                    role="option"
-                    aria-selected={selectedArticle()?.id === article.id}
-                    aria-label={`${article.title}, ${article.is_read ? "read" : "unread"}${article.is_starred ? ", starred" : ""}`}
+                    aria-posinset={index() + 1}
+                    aria-setsize={articles().length}
+                    aria-labelledby={titleId}
+                    aria-describedby={snippetId}
                     tabindex={selectedArticleIndex() === index() ? 0 : -1}
                     class={`article-item ${article.is_read ? "read" : "unread"}`}
                     onClick={() => selectArticle(article, index())}
@@ -983,6 +1005,14 @@ export default function App() {
                         e.preventDefault();
                         navigateArticle(-1);
                       }
+                      if (e.key === "PageDown") {
+                        e.preventDefault();
+                        navigateArticle(1);
+                      }
+                      if (e.key === "PageUp") {
+                        e.preventDefault();
+                        navigateArticle(-1);
+                      }
                     }}
                     onFocus={() => setSelectedArticleIndex(index())}
                   >
@@ -993,7 +1023,10 @@ export default function App() {
                       {article.is_starred ? "\u2605" : ""}
                     </span>
                     <span id={titleId} class="article-title">{article.title}</span>
-                  </div>
+                    <span id={snippetId} class="sr-only">
+                      {article.summary ? article.summary.substring(0, 100) : ""}
+                    </span>
+                  </article>
                 );
               }}
             </For>
