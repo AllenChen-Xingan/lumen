@@ -161,7 +161,42 @@ ul {
   list-style: none;
 }
 
-li[role="option"] {
+ul[role="list"] li {
+  padding: 0;
+}
+
+/* Feed list items */
+.feed-button {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  cursor: pointer;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font-size: inherit;
+  text-align: left;
+}
+
+.feed-button:hover {
+  background: var(--hover);
+}
+
+.feed-button[aria-current="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+
+.feed-button:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Article items in feed */
+article.article-item {
   padding: 8px 12px;
   cursor: pointer;
   display: flex;
@@ -170,16 +205,11 @@ li[role="option"] {
   border-bottom: 1px solid var(--border);
 }
 
-li[role="option"]:hover {
+article.article-item:hover {
   background: var(--hover);
 }
 
-li[role="option"][aria-selected="true"] {
-  background: var(--accent);
-  color: #fff;
-}
-
-li[role="option"]:focus-visible {
+article.article-item:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -252,7 +282,7 @@ li[role="option"]:focus-visible {
 }
 
 input:focus-visible,
-[role="listbox"]:focus-visible {
+[role="feed"]:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -363,19 +393,20 @@ input:focus-visible,
     outline-offset: 2px;
   }
 
-  li[role="option"][aria-selected="true"] {
+  .feed-button[aria-current="true"] {
     background: Highlight;
     color: HighlightText;
     forced-color-adjust: none;
   }
 
-  li[role="option"]:focus-visible {
+  .feed-button:focus-visible,
+  article.article-item:focus-visible {
     outline: 3px solid Highlight;
     outline-offset: -2px;
   }
 
   input:focus-visible,
-  [role="listbox"]:focus-visible {
+  [role="feed"]:focus-visible {
     outline: 3px solid Highlight;
     outline-offset: -2px;
   }

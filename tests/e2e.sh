@@ -27,7 +27,7 @@ e2e_test() {
     local expect="$3"
     echo -n "  E2E: $name... "
     OUTPUT=$(eval "$cmd" 2>&1) || true
-    if echo "$OUTPUT" | grep -q "$expect"; then
+    if echo "$OUTPUT" | grep -qE "$expect"; then
         echo "PASS"
         PASS=$((PASS + 1))
     else
@@ -56,7 +56,7 @@ e2e_test "List shows added feed" "$CLI list" "BBC"
 e2e_test "Articles found" "$CLI articles" "\["
 
 # Test 6: Fetch updates
-e2e_test "Fetch works" "$CLI fetch" "Fetched\|new articles"
+e2e_test "Fetch works" "$CLI fetch" "Fetched|new articles"
 
 # Test 7: Remove feed
 e2e_test "Remove feed" "$CLI remove 1" "removed"
