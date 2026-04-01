@@ -24,10 +24,11 @@ interface Article {
 }
 
 interface Folder {
-  id: number;
+  id: number | null;
   name: string;
-  type: string;  // "manual" | "smart"
+  type: string;  // "cognitive" | "manual" | "smart"
   query: string | null;
+  article_count: number | null;
 }
 
 export default function App() {
@@ -49,7 +50,7 @@ export default function App() {
   const [fullTextLoading, setFullTextLoading] = createSignal(false);
   const [fullTextError, setFullTextError] = createSignal<string | null>(null);
   const [folders, setFolders] = createSignal<Folder[]>([]);
-  const [selectedFolder, setSelectedFolder] = createSignal<number | null>(null);
+  const [selectedFolder, setSelectedFolder] = createSignal<string | null>(null);
 
   const [expandedSections, setExpandedSections] = createSignal<Record<string, boolean>>({
     "smart-folders": true,
@@ -68,61 +69,8 @@ export default function App() {
 
   const unreadCount = () => articles().filter((a) => !a.is_read).length;
 
-  const smartFolders = () => folders().filter(f => f.type === "smart");
+  const cognitiveFolders = () => folders().filter(f => f.type === "cognitive");
   const manualFolders = () => folders().filter(f => f.type === "manual");
-
-  // Smart folder suggest/reset state
-  interface Suggestion { index: number; name: string; related_entities?: string; article_count: number; query: string; }
-  const [suggestions, setSuggestions] = createSignal<Suggestion[]>([]);
-  const [showSuggestions, setShowSuggestions] = createSignal(false);
-  const [showResetInput, setShowResetInput] = createSignal(false);
-  const [resetReason, setResetReason] = createSignal("");
-  const [suggestLoading, setSuggestLoading] = createSignal(false);
-
-  const triggerSuggest = async () => {
-    setSuggestLoading(true);
-    setStatus("Analyzing feeds for smart folder suggestions...");
-    try {
-      const result = await invoke<Suggestion[]>("suggest_folders");
-      setSuggestions(result);
-      setShowSuggestions(true);
-      setStatus(`${result.length} smart folder suggestions ready`);
-    } catch (e) {
-      setStatus(`Error: ${e}`);
-    } finally {
-      setSuggestLoading(false);
-    }
-  };
-
-  const acceptSuggestions = async (exceptIndices?: number[]) => {
-    try {
-      const except = exceptIndices?.join(",") || undefined;
-      await invoke("accept_folders", { except });
-      setShowSuggestions(false);
-      setSuggestions([]);
-      await loadFolders();
-      setStatus("Smart folders created!");
-    } catch (e) {
-      setStatus(`Error: ${e}`);
-    }
-  };
-
-  const resetSmartFolders = async () => {
-    const reason = resetReason().trim();
-    if (!reason) return;
-    setStatus("Resetting smart folders...");
-    try {
-      const result = await invoke<{ new_suggestions: Suggestion[]; deleted: number }>("reset_folders", { reason });
-      setSuggestions(result.new_suggestions || []);
-      setShowSuggestions(result.new_suggestions?.length > 0);
-      setShowResetInput(false);
-      setResetReason("");
-      await loadFolders();
-      setStatus(`Reset ${result.deleted} folders. ${result.new_suggestions?.length || 0} new suggestions.`);
-    } catch (e) {
-      setStatus(`Error: ${e}`);
-    }
-  };
 
   const toggleSection = (section: string) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
@@ -134,7 +82,6 @@ export default function App() {
   const getVisibleTreeItems = (): HTMLElement[] => {
     if (!feedListRef) return [];
     return Array.from(feedListRef.querySelectorAll<HTMLElement>('[role="treeitem"]')).filter(el => {
-      // An item is visible if none of its ancestor groups are collapsed
       let parent = el.parentElement;
       while (parent && parent !== feedListRef) {
         if (parent.getAttribute("role") === "group") {
@@ -190,7 +137,7 @@ export default function App() {
       const result = await invoke<Folder[]>("list_folders");
       setFolders(result);
     } catch (e) {
-      // Folders not available yet — that's fine
+      // Folders not available yet
     }
   };
 
@@ -302,14 +249,6 @@ export default function App() {
     if (menu.type === "folder") {
       return [
         {
-          label: "Rename folder",
-          action: () => {
-            // TODO: implement rename_folder invoke when Tauri command exists
-            setStatus("Rename folder: not yet implemented");
-            closeContextMenu();
-          },
-        },
-        {
           label: "Delete folder",
           action: async () => {
             try {
@@ -362,7 +301,6 @@ export default function App() {
       return;
     }
     if (e.key === "Tab") {
-      // Trap focus inside menu
       e.preventDefault();
       return;
     }
@@ -393,8 +331,7 @@ export default function App() {
       updateRefreshLabel();
       const fid = selectedFeed();
       await loadArticles(fid ?? undefined);
-      // Auto-analyze new articles in background (silent, no UI block)
-      invoke("analyze_articles").catch(() => {});
+      await loadFolders(); // refresh folder counts
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
@@ -455,20 +392,31 @@ export default function App() {
     }
   };
 
-  const selectFolder = async (folder: Folder) => {
-    setSelectedFolder(folder.id);
+  const selectCognitiveFolder = async (folderName: string) => {
+    setSelectedFolder(folderName);
     setSelectedFeed(null);
     setSelectedArticle(null);
     setSelectedArticleIndex(0);
     setActivePane("articles");
     try {
-      const result = await invoke<Article[]>("folder_articles", { id: folder.id });
+      const result = await invoke<Article[]>("folder_articles", { name: folderName });
       setArticles(result);
-      setStatus(`${folder.name}: ${result.length} articles`);
+      setStatus(`${folderName}: ${result.length} articles`);
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
     requestAnimationFrame(() => focusArticleItem(0));
+  };
+
+  const resetSmartFolders = async () => {
+    setStatus("Resetting tags and re-classifying...");
+    try {
+      await invoke("reset_folders");
+      await loadFolders();
+      setStatus("Tags cleared and articles re-classified.");
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
   };
 
   const selectFeed = async (feed: Feed, index?: number) => {
@@ -498,11 +446,9 @@ export default function App() {
         prev.map((a) => (a.id === article.id ? { ...a, is_read: true } : a))
       );
     }
-    // Auto-fetch full text in background (optimistic UI)
     if (article.url) {
       fetchFullText(article.id);
     }
-    // Prefetch nearby articles
     if (index !== undefined) {
       prefetchNearby(index);
     }
@@ -538,7 +484,6 @@ export default function App() {
     for (const offset of [-1, 1, 2]) {
       const i = currentIndex + offset;
       if (i >= 0 && i < list.length && list[i].url) {
-        // Silent prefetch — ignore errors, results cached in DB
         invoke("fetch_full_text", { id: list[i].id }).catch(() => {});
       }
     }
@@ -566,7 +511,6 @@ export default function App() {
     }
   };
 
-  // Navigate visible tree items
   const navigateFeed = (delta: number) => {
     const items = getVisibleTreeItems();
     const totalItems = items.length;
@@ -586,7 +530,6 @@ export default function App() {
 
     const pane = activePane();
 
-    // Close context menu on Escape (handled first, before pane navigation)
     if (e.key === "Escape" && contextMenu()) {
       e.preventDefault();
       closeContextMenu();
@@ -600,7 +543,6 @@ export default function App() {
       return;
     }
 
-    // Pane shortcuts: 1=feeds, 2=articles, 3=reader
     if (e.key === "1") { focusPane("feeds"); return; }
     if (e.key === "2") { focusPane("articles"); return; }
     if (e.key === "3") { focusPane("reader"); return; }
@@ -623,11 +565,9 @@ export default function App() {
         const el = document.activeElement as HTMLElement;
         const expanded = el?.getAttribute("aria-expanded");
         if (expanded === "false") {
-          // Expand this section
           const sectionId = el?.dataset.section;
           if (sectionId) toggleSection(sectionId);
         } else if (expanded === "true") {
-          // Move to first child
           navigateFeed(1);
         }
       }
@@ -636,11 +576,9 @@ export default function App() {
         const el = document.activeElement as HTMLElement;
         const expanded = el?.getAttribute("aria-expanded");
         if (expanded === "true") {
-          // Collapse this section
           const sectionId = el?.dataset.section;
           if (sectionId) toggleSection(sectionId);
         } else {
-          // Move to parent treeitem
           const group = el?.closest('[role="group"]');
           if (group) {
             const parentItem = group.parentElement as HTMLElement;
@@ -658,18 +596,16 @@ export default function App() {
       else if (e.key === "Enter") {
         e.preventDefault();
         const el = document.activeElement as HTMLElement;
-        // Check if it's a section header — toggle expand
         if (el?.getAttribute("aria-expanded") !== null && el?.dataset.section) {
           toggleSection(el.dataset.section);
           return;
         }
         const feedId = el?.dataset.feedId;
-        const folderId = el?.dataset.folderId;
+        const folderName = el?.dataset.folderName;
         if (el?.id === "feed-all") {
           loadAllArticles();
-        } else if (folderId) {
-          const folder = folders().find(f => f.id === parseInt(folderId));
-          if (folder) selectFolder(folder);
+        } else if (folderName) {
+          selectCognitiveFolder(folderName);
         } else if (feedId) {
           const feed = feeds().find(f => f.id === parseInt(feedId));
           if (feed) selectFeed(feed, selectedFeedIndex());
@@ -695,7 +631,6 @@ export default function App() {
         }
       }
       else if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
-        // Open context menu at current item position
         e.preventDefault();
         const el = document.activeElement as HTMLElement;
         if (el) {
@@ -705,18 +640,12 @@ export default function App() {
           if (feedId) {
             openContextMenu(rect.left + 20, rect.bottom, "feed", parseInt(feedId));
           } else if (folderId) {
-            // Only manual folders get context menus
             const folder = folders().find(f => f.id === parseInt(folderId));
             if (folder && folder.type === "manual") {
               openContextMenu(rect.left + 20, rect.bottom, "folder", parseInt(folderId));
             }
           }
         }
-      }
-      else if (e.key === "F2") {
-        e.preventDefault();
-        // TODO: implement inline rename when rename_folder command exists
-        setStatus("Rename: not yet implemented (F2)");
       }
     }
 
@@ -746,7 +675,6 @@ export default function App() {
     loadFolders();
     document.addEventListener("keydown", handleKeyDown);
 
-    // Close context menu on click outside
     const handleClickOutside = (e: MouseEvent) => {
       if (contextMenu() && !(e.target as HTMLElement)?.closest('[role="menu"]')) {
         closeContextMenu();
@@ -772,18 +700,14 @@ export default function App() {
 
   return (
     <div class="app" aria-label="RSS Reader">
-      {/* Visually hidden app heading for screen readers */}
       <h1 class="sr-only">RSS Reader</h1>
 
-      {/* Skip navigation link */}
       <a href="#reader-pane" class="skip-link">Skip to main content</a>
 
-      {/* Live region for article announcements */}
       <div class="sr-only" aria-live="assertive" aria-atomic="true">
         {articleAnnouncement()}
       </div>
 
-      {/* Status bar */}
       <div class="status-bar" role="status" aria-live="polite" aria-atomic="true">
         <span>{status()}</span>
         <Show when={lastRefreshLabel()}>
@@ -855,7 +779,7 @@ export default function App() {
             aria-label="Feed subscriptions"
             tabindex={-1}
           >
-            {/* All Articles — top-level treeitem */}
+            {/* All Articles */}
             <li
               id="feed-all"
               role="treeitem"
@@ -873,7 +797,7 @@ export default function App() {
               <span class="feed-title">All Articles</span>
             </li>
 
-            {/* Smart Folders section */}
+            {/* Smart Folders section (4 fixed cognitive folders) */}
             <li
               role="treeitem"
               aria-expanded={isSectionExpanded("smart-folders")}
@@ -890,91 +814,42 @@ export default function App() {
             <Show when={isSectionExpanded("smart-folders")}>
               <li role="none">
                 <ul role="group">
-                  {/* Existing smart folders */}
-                  <For each={smartFolders()}>
+                  <For each={cognitiveFolders()}>
                     {(folder) => (
                       <li
                         role="treeitem"
                         class="feed-button tree-child"
                         tabindex={-1}
-                        aria-selected={selectedFolder() === folder.id}
-                        aria-label={`${folder.name} smart folder`}
-                        data-folder-id={folder.id}
-                        onClick={() => selectFolder(folder)}
+                        aria-selected={selectedFolder() === folder.name}
+                        aria-label={`${folder.name} smart folder, ${folder.article_count ?? 0} articles`}
+                        data-folder-name={folder.name}
+                        onClick={() => selectCognitiveFolder(folder.name)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
-                            selectFolder(folder);
+                            selectCognitiveFolder(folder.name);
                           }
                         }}
                       >
                         <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC1"}</span>
                         <span class="feed-title">{folder.name}</span>
+                        <Show when={(folder.article_count ?? 0) > 0}>
+                          <span class="unread-badge" aria-hidden="true">{folder.article_count}</span>
+                        </Show>
                       </li>
                     )}
                   </For>
 
-                  {/* Suggest / Reset actions */}
+                  {/* Reset action */}
                   <li role="none" class="smart-folder-actions">
-                    <Show when={smartFolders().length === 0 && !showSuggestions()}>
-                      <button
-                        class="sf-action-btn"
-                        onClick={triggerSuggest}
-                        disabled={suggestLoading()}
-                        aria-label="Suggest smart folders"
-                      >
-                        {suggestLoading() ? "Analyzing..." : "Suggest"}
-                      </button>
-                    </Show>
-                    <Show when={smartFolders().length > 0}>
-                      <button
-                        class="sf-action-btn"
-                        onClick={() => setShowResetInput(!showResetInput())}
-                        aria-label="Reset smart folders"
-                      >
-                        Reset
-                      </button>
-                    </Show>
+                    <button
+                      class="sf-action-btn"
+                      onClick={resetSmartFolders}
+                      aria-label="Reset: clear tags and re-classify"
+                    >
+                      Reset
+                    </button>
                   </li>
-
-                  {/* Reset reason input */}
-                  <Show when={showResetInput()}>
-                    <li role="none" class="smart-folder-reset">
-                      <form onSubmit={(e) => { e.preventDefault(); resetSmartFolders(); }}>
-                        <label for="reset-reason" class="sr-only">Why reset?</label>
-                        <input
-                          id="reset-reason"
-                          type="text"
-                          placeholder="What's wrong? e.g. too generic"
-                          value={resetReason()}
-                          onInput={(e) => setResetReason(e.currentTarget.value)}
-                          onKeyDown={(e) => { if (e.key === "Escape") { setShowResetInput(false); setResetReason(""); } }}
-                          aria-label="Reset reason"
-                        />
-                        <button type="submit" disabled={!resetReason().trim()}>Go</button>
-                      </form>
-                    </li>
-                  </Show>
-
-                  {/* Suggestion preview */}
-                  <Show when={showSuggestions() && suggestions().length > 0}>
-                    <For each={suggestions()}>
-                      {(s) => (
-                        <li role="treeitem" class="feed-button tree-child suggestion-item" tabindex={-1}>
-                          <span class="feed-title">{s.name}</span>
-                          <span class="unread-badge" aria-label={`${s.article_count} articles`}>{s.article_count}</span>
-                        </li>
-                      )}
-                    </For>
-                    <li role="none" class="smart-folder-actions">
-                      <button class="sf-action-btn sf-accept" onClick={() => acceptSuggestions()} aria-label="Accept all suggestions">
-                        Accept All
-                      </button>
-                      <button class="sf-action-btn" onClick={() => { setShowSuggestions(false); setSuggestions([]); }} aria-label="Dismiss suggestions">
-                        Dismiss
-                      </button>
-                    </li>
-                  </Show>
                 </ul>
               </li>
             </Show>

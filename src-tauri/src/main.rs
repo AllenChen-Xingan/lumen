@@ -44,6 +44,13 @@ pub struct FetchResult {
     pub error: Option<String>,
 }
 
+/// Fixed cognitive smart folder
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SmartFolder {
+    pub name: String,
+    pub article_count: i64,
+}
+
 // ── CLI helpers ───────────────────────────────────────────────────────────
 
 fn cli_path() -> String {
@@ -219,11 +226,12 @@ fn export_opml() -> Result<String, String> {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Folder {
-    pub id: i64,
+    pub id: Option<i64>,
     pub name: String,
     #[serde(rename = "type")]
     pub folder_type: String,
     pub query: Option<String>,
+    pub article_count: Option<i64>,
 }
 
 #[tauri::command]
@@ -235,38 +243,39 @@ fn list_folders() -> Result<Vec<Folder>, String> {
 }
 
 #[tauri::command]
-fn folder_articles(id: i64, count: Option<usize>) -> Result<Vec<Article>, String> {
+fn folder_articles(name: String, count: Option<usize>) -> Result<Vec<Article>, String> {
     let count_str = (count.unwrap_or(100)).to_string();
-    let result = cli(&["folders", "articles", &id.to_string(), "--count", &count_str])?;
+    let result = cli(&["folders", "articles", &name, "--count", &count_str])?;
     let articles: Vec<Article> = serde_json::from_value(result["articles"].clone())
         .map_err(|e| format!("Failed to parse articles: {}", e))?;
     Ok(articles)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct AnalyzeResult {
-    pub articles_analyzed: i64,
-    pub entities_found: i64,
+pub struct ClassifyResult {
+    pub articles_classified: i64,
+    pub tags_assigned: i64,
 }
 
 #[tauri::command]
-fn analyze_articles() -> Result<AnalyzeResult, String> {
-    let result = cli(&["_analyze"])?;
-    let analyze: AnalyzeResult = serde_json::from_value(result.clone())
-        .map_err(|e| format!("Failed to parse analyze result: {}", e))?;
-    Ok(analyze)
+fn classify_articles() -> Result<ClassifyResult, String> {
+    let result = cli(&["_classify"])?;
+    let classify: ClassifyResult = serde_json::from_value(result.clone())
+        .map_err(|e| format!("Failed to parse classify result: {}", e))?;
+    Ok(classify)
 }
 
 #[tauri::command]
 fn create_folder(name: String) -> Result<Folder, String> {
     let result = cli(&["folders", "create", &name])?;
-    let id = result["id"].as_i64().ok_or("Missing folder id")?;
+    let id = result["id"].as_i64();
     let folder_name = result["name"].as_str().unwrap_or(&name).to_string();
     Ok(Folder {
         id,
         name: folder_name,
         folder_type: "manual".to_string(),
         query: None,
+        article_count: None,
     })
 }
 
@@ -288,48 +297,9 @@ fn move_feed(feed_id: i64, folder_id: Option<i64>) -> Result<bool, String> {
     Ok(true)
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SmartFolderSuggestion {
-    pub index: usize,
-    pub name: String,
-    pub related_entities: Option<String>,
-    pub article_count: i64,
-    pub query: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ResetResult {
-    pub deleted: usize,
-    pub reason: String,
-    pub new_suggestions: Vec<SmartFolderSuggestion>,
-}
-
 #[tauri::command]
-fn suggest_folders() -> Result<Vec<SmartFolderSuggestion>, String> {
-    let result = cli(&["folders", "suggest"])?;
-    let suggestions: Vec<SmartFolderSuggestion> = serde_json::from_value(result["suggestions"].clone())
-        .unwrap_or_default();
-    Ok(suggestions)
-}
-
-#[tauri::command]
-fn accept_folders(except: Option<String>) -> Result<Vec<Folder>, String> {
-    let mut args = vec!["folders", "accept"];
-    let except_str;
-    if let Some(ref e) = except {
-        except_str = e.clone();
-        args.push("--except");
-        args.push(&except_str);
-    }
-    let result = cli(&args)?;
-    let folders: Vec<Folder> = serde_json::from_value(result["created"].clone())
-        .unwrap_or_default();
-    Ok(folders)
-}
-
-#[tauri::command]
-fn reset_folders(reason: String) -> Result<serde_json::Value, String> {
-    let result = cli(&["folders", "reset", "--reason", &reason])?;
+fn reset_folders() -> Result<serde_json::Value, String> {
+    let result = cli(&["folders", "reset"])?;
     Ok(result)
 }
 
@@ -352,12 +322,10 @@ fn main() {
             fetch_full_text,
             list_folders,
             folder_articles,
-            analyze_articles,
+            classify_articles,
             create_folder,
             delete_folder,
             move_feed,
-            suggest_folders,
-            accept_folders,
             reset_folders,
         ])
         .run(tauri::generate_context!())

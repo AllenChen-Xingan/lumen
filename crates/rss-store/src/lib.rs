@@ -67,7 +67,7 @@ impl Database {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_feed_guid ON articles(feed_id, guid);"
         );
 
-        // Entities table
+        // Entities table (kept for backward compatibility, no longer used for folders)
         self.conn.execute_batch("
             CREATE TABLE IF NOT EXISTS entities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +110,12 @@ impl Database {
             "ALTER TABLE articles ADD COLUMN analyzed INTEGER NOT NULL DEFAULT 0;"
         );
 
-        // Rejected suggestions (feedback loop)
+        // Migration: add tags column for cognitive folder classification
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN tags TEXT;"
+        );
+
+        // Legacy tables (kept, not dropped)
         self.conn.execute_batch("
             CREATE TABLE IF NOT EXISTS rejected_suggestions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,7 +292,7 @@ impl Database {
         }
     }
 
-    // ── Entity methods ──
+    // ── Entity methods (kept for backward compat) ──
 
     pub fn add_entities(&self, article_id: i64, entities: &[(String, String, Option<String>, f32)]) -> Result<usize, rusqlite::Error> {
         let mut count = 0;
@@ -400,6 +405,112 @@ impl Database {
         Ok(results)
     }
 
+    // ── Tag methods (new cognitive folder system) ──
+
+    /// Set tags for an article (comma-separated)
+    pub fn set_article_tags(&self, article_id: i64, tags: &[String]) -> Result<bool, rusqlite::Error> {
+        let tags_str = tags.join(",");
+        let changed = self.conn.execute(
+            "UPDATE articles SET tags = ?1, analyzed = 1 WHERE id = ?2",
+            rusqlite::params![tags_str, article_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Get articles matching a tag (LIKE query on comma-separated tags)
+    pub fn get_articles_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        // Match tag exactly: either the whole field, at start, at end, or in middle
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at
+             FROM articles
+             WHERE tags = ?1
+                OR tags LIKE ?2
+                OR tags LIKE ?3
+                OR tags LIKE ?4
+             ORDER BY published_at DESC LIMIT {}",
+            limit
+        ))?;
+        let exact = tag.to_string();
+        let starts = format!("{},%", tag);
+        let ends = format!("%,{}", tag);
+        let middle = format!("%,{},%", tag);
+        let articles = stmt.query_map(rusqlite::params![exact, starts, ends, middle], |row| {
+            let published_str: Option<String> = row.get(7)?;
+            let fetched_str: String = row.get(10)?;
+            Ok(Article {
+                id: row.get(0)?,
+                feed_id: row.get(1)?,
+                guid: row.get(2)?,
+                title: row.get(3)?,
+                url: row.get(4)?,
+                content: row.get(5)?,
+                summary: row.get(6)?,
+                published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+                is_read: { let v: i32 = row.get(8)?; v != 0 },
+                is_starred: { let v: i32 = row.get(9)?; v != 0 },
+                fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                full_content: None,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    /// Count articles for a given tag
+    pub fn count_articles_by_tag(&self, tag: &str) -> Result<i64, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM articles
+             WHERE tags = ?1
+                OR tags LIKE ?2
+                OR tags LIKE ?3
+                OR tags LIKE ?4"
+        )?;
+        let exact = tag.to_string();
+        let starts = format!("{},%", tag);
+        let ends = format!("%,{}", tag);
+        let middle = format!("%,{},%", tag);
+        stmt.query_row(rusqlite::params![exact, starts, ends, middle], |row| row.get(0))
+    }
+
+    /// Clear all tags (for reset + re-classify)
+    pub fn clear_all_tags(&self) -> Result<usize, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE articles SET tags = NULL, analyzed = 0 WHERE tags IS NOT NULL", []
+        )?;
+        Ok(changed)
+    }
+
+    /// List articles that have no tags yet (for classification)
+    pub fn list_untagged_articles(&self) -> Result<Vec<Article>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at
+             FROM articles WHERE (tags IS NULL OR tags = '') AND (content IS NOT NULL OR summary IS NOT NULL)
+             ORDER BY published_at DESC"
+        )?;
+        let articles = stmt.query_map([], |row| {
+            let published_str: Option<String> = row.get(7)?;
+            let fetched_str: String = row.get(10)?;
+            Ok(Article {
+                id: row.get(0)?,
+                feed_id: row.get(1)?,
+                guid: row.get(2)?,
+                title: row.get(3)?,
+                url: row.get(4)?,
+                content: row.get(5)?,
+                summary: row.get(6)?,
+                published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+                is_read: { let v: i32 = row.get(8)?; v != 0 },
+                is_starred: { let v: i32 = row.get(9)?; v != 0 },
+                fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                full_content: None,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
     // ── Folder methods ──
 
     pub fn create_folder(&self, name: &str, folder_type: &str, query: Option<&str>) -> Result<i64, rusqlite::Error> {
@@ -446,233 +557,6 @@ impl Database {
             rusqlite::params![folder_id, feed_id],
         );
         Ok(result.map(|n| n > 0).unwrap_or(false))
-    }
-
-    pub fn get_smart_folder_articles(&self, query: &str, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
-        let mut sql = String::from(
-            "SELECT DISTINCT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at
-             FROM articles a JOIN entities e ON a.id = e.article_id WHERE 1=1"
-        );
-        for part in query.split(" AND ") {
-            let part = part.trim();
-            if let Some(t) = part.strip_prefix("type:") {
-                sql.push_str(&format!(" AND e.entity_type = '{}'", t.replace('\'', "''")));
-            } else if let Some(n) = part.strip_prefix("name:") {
-                let pattern = n.replace('*', "%").replace('\'', "''");
-                sql.push_str(&format!(" AND e.name LIKE '{}'", pattern));
-            } else {
-                sql.push_str(&format!(" AND e.name LIKE '%{}%'", part.replace('\'', "''")));
-            }
-        }
-        sql.push_str(&format!(" ORDER BY a.published_at DESC LIMIT {}", limit));
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let articles = stmt.query_map([], |row| {
-            let published_str: Option<String> = row.get(7)?;
-            let fetched_str: String = row.get(10)?;
-            Ok(Article {
-                id: row.get(0)?,
-                feed_id: row.get(1)?,
-                guid: row.get(2)?,
-                title: row.get(3)?,
-                url: row.get(4)?,
-                content: row.get(5)?,
-                summary: row.get(6)?,
-                published_at: published_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
-                is_read: { let v: i32 = row.get(8)?; v != 0 },
-                is_starred: { let v: i32 = row.get(9)?; v != 0 },
-                fetched_at: chrono::DateTime::parse_from_rfc3339(&fetched_str)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-                full_content: None,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
-        Ok(articles)
-    }
-
-    /// Cluster entities into top N topic groups for smart folder suggestions.
-    /// Uses co-occurrence: entities that appear together in articles form a cluster.
-    /// Returns: Vec<(cluster_name, entity_names_csv, article_count, query_string)>
-    pub fn suggest_smart_folders(&self, max_folders: usize) -> Result<Vec<(String, String, i64, String)>, rusqlite::Error> {
-        // Layer 1: Get rejected entities to exclude
-        let rejected = self.get_rejected_entities().unwrap_or_default();
-        // Layer 2: Infer min entity length from rejection patterns
-        let min_len = self.infer_min_entity_length().unwrap_or(2);
-
-        // Step 1: Get top entities by frequency (concepts first, then orgs)
-        let mut stmt = self.conn.prepare(
-            "SELECT name, entity_type, COUNT(DISTINCT article_id) as article_cnt
-             FROM entities
-             GROUP BY name, entity_type
-             HAVING article_cnt >= 2
-             ORDER BY
-                 CASE entity_type WHEN 'concept' THEN 0 WHEN 'organization' THEN 1 ELSE 2 END,
-                 article_cnt DESC
-             LIMIT 30"
-        )?;
-        let top_entities: Vec<(String, String, i64)> = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?.collect::<Result<Vec<_>, _>>()?;
-
-        if top_entities.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Step 2: Greedily pick top entities as cluster seeds, skipping rejected/short/overlapping
-        let mut used_articles: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        let mut suggestions = Vec::new();
-
-        for (name, etype, count) in &top_entities {
-            if suggestions.len() >= max_folders {
-                break;
-            }
-
-            // Layer 1: Skip rejected entities
-            if rejected.iter().any(|r| r.eq_ignore_ascii_case(name)) {
-                continue;
-            }
-
-            // Layer 2: Skip entities shorter than inferred minimum
-            if name.len() < min_len {
-                continue;
-            }
-
-            // Get articles this entity appears in
-            let mut art_stmt = self.conn.prepare(
-                "SELECT DISTINCT article_id FROM entities WHERE name = ?1"
-            )?;
-            let articles: Vec<i64> = art_stmt.query_map([name.as_str()], |row| {
-                row.get(0)
-            })?.collect::<Result<Vec<_>, _>>()?;
-
-            // Skip if > 50% overlap with already-used articles
-            let overlap = articles.iter().filter(|a| used_articles.contains(a)).count();
-            if !articles.is_empty() && overlap as f64 / articles.len() as f64 > 0.5 {
-                continue;
-            }
-
-            // Find co-occurring entities for this cluster
-            let mut co_stmt = self.conn.prepare(
-                "SELECT e2.name, COUNT(DISTINCT e2.article_id) as cnt
-                 FROM entities e1
-                 JOIN entities e2 ON e1.article_id = e2.article_id AND e1.name != e2.name
-                 WHERE e1.name = ?1
-                 GROUP BY e2.name
-                 ORDER BY cnt DESC
-                 LIMIT 3"
-            )?;
-            let co_entities: Vec<String> = co_stmt.query_map([name.as_str()], |row| {
-                row.get::<_, String>(0)
-            })?.collect::<Result<Vec<_>, _>>()?;
-
-            // Build cluster
-            let cluster_name = name.clone();
-            let mut all_names = vec![name.clone()];
-            all_names.extend(co_entities.iter().cloned());
-            let names_csv = all_names.join(", ");
-
-            // Build query string for the smart folder
-            let query = if etype == "concept" {
-                format!("type:concept AND name:{}*", name)
-            } else {
-                name.clone()
-            };
-
-            // Mark these articles as used
-            for a in &articles {
-                used_articles.insert(*a);
-            }
-
-            suggestions.push((cluster_name, names_csv, *count, query));
-        }
-
-        Ok(suggestions)
-    }
-
-    /// Accept suggested smart folders — create them in DB
-    pub fn accept_suggested_folders(&self, suggestions: &[(String, String, i64, String)], except: &[usize]) -> Result<Vec<(i64, String)>, rusqlite::Error> {
-        let mut created = Vec::new();
-        for (i, (name, _names_csv, _count, query)) in suggestions.iter().enumerate() {
-            if except.contains(&i) {
-                continue;
-            }
-            let id = self.create_folder(name, "smart", Some(query))?;
-            created.push((id, name.clone()));
-        }
-        Ok(created)
-    }
-
-    /// Reset all smart folders: delete them, record reason, add old names to rejected list
-    pub fn reset_smart_folders(&self, reason: &str) -> Result<usize, rusqlite::Error> {
-        // Get current smart folder names to reject them
-        let smart_names: Vec<String> = self.conn.prepare(
-            "SELECT name FROM folders WHERE folder_type = 'smart'"
-        )?.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?;
-
-        // Delete all smart folders
-        let deleted = self.conn.execute(
-            "DELETE FROM folders WHERE folder_type = 'smart'", []
-        )?;
-
-        // Record reason
-        let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT INTO reset_reasons (reason, reset_at) VALUES (?1, ?2)",
-            rusqlite::params![reason, now],
-        )?;
-
-        // Add old folder names to rejected list so they don't resurface
-        self.reject_entities(&smart_names)?;
-
-        Ok(deleted)
-    }
-
-    /// Get all reset reasons (for LLM context)
-    pub fn get_reset_reasons(&self) -> Result<Vec<(String, String)>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT reason, reset_at FROM reset_reasons ORDER BY reset_at DESC"
-        )?;
-        let results = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?.collect::<Result<Vec<_>, _>>()?;
-        Ok(results)
-    }
-
-    /// Record rejected entity names so future suggestions skip them
-    pub fn reject_entities(&self, names: &[String]) -> Result<usize, rusqlite::Error> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut count = 0;
-        for name in names {
-            self.conn.execute(
-                "INSERT INTO rejected_suggestions (entity_name, rejected_at) VALUES (?1, ?2)",
-                rusqlite::params![name, now],
-            )?;
-            count += 1;
-        }
-        Ok(count)
-    }
-
-    /// Get all rejected entity names
-    pub fn get_rejected_entities(&self) -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT entity_name FROM rejected_suggestions")?;
-        let results = stmt.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?;
-        Ok(results)
-    }
-
-    /// Infer minimum entity name length from rejection patterns (Layer 2 heuristic)
-    /// If user keeps rejecting short entities, raise the bar
-    pub fn infer_min_entity_length(&self) -> Result<usize, rusqlite::Error> {
-        let rejected = self.get_rejected_entities()?;
-        if rejected.len() < 3 {
-            return Ok(2); // default: at least 2 chars
-        }
-        let avg_len: f64 = rejected.iter().map(|s| s.len() as f64).sum::<f64>() / rejected.len() as f64;
-        // If average rejected entity is short (≤5 chars), user prefers longer/more specific entities
-        if avg_len <= 5.0 {
-            Ok(6) // raise minimum to 6 chars
-        } else {
-            Ok(2)
-        }
     }
 
     pub fn get_folder_feed_articles(&self, folder_id: i64, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {

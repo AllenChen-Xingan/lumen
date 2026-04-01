@@ -60,13 +60,23 @@ enum Commands {
     },
     /// Fetch full-text content for an article (cached)
     FetchFullText { id: i64 },
-    /// Internal: analyze articles with NER
-    #[command(name = "_analyze", hide = true)]
-    Analyze {
+    /// Internal: classify articles into cognitive folders
+    #[command(name = "_classify", hide = true)]
+    Classify {
         #[arg(long)]
         article: Option<i64>,
         #[arg(long)]
         download_model: bool,
+        /// Force re-classify all articles (clear existing tags first)
+        #[arg(long)]
+        force: bool,
+    },
+    /// Internal: manually set tags on an article
+    #[command(name = "_tag", hide = true)]
+    Tag {
+        id: i64,
+        #[arg(long)]
+        tags: String,
     },
     /// Internal: query extracted entities
     #[command(name = "_entities", hide = true)]
@@ -112,30 +122,15 @@ enum FolderAction {
         feeds: Option<String>,
     },
     Remove { id: i64 },
+    /// List articles in a folder: by ID (manual folders) or by name (cognitive folders)
     Articles {
-        id: i64,
+        /// Folder name (新知/动态/深度/行动) or numeric ID for manual folders
+        name: String,
         #[arg(long, default_value_t = 30)]
         count: usize,
     },
-    /// Suggest smart folders based on entity clustering (does NOT create them)
-    Suggest,
-    /// Accept suggested folders (creates them)
-    Accept {
-        /// Comma-separated indices to exclude (e.g. "1,3" to skip suggestions 1 and 3)
-        #[arg(long)]
-        except: Option<String>,
-    },
-    /// Reject suggestions — system learns and avoids these next time
-    Reject {
-        /// Comma-separated indices to reject (e.g. "0,2"), or omit to reject all
-        indices: Option<String>,
-    },
-    /// Reset all smart folders — delete, record reason, re-suggest
-    Reset {
-        /// Why are you resetting? (stored for future suggestions)
-        #[arg(long)]
-        reason: String,
-    },
+    /// Reset: clear all tags and re-classify
+    Reset,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +231,7 @@ fn describe_commands() -> Value {
             },
             {
                 "name": "fetch",
-                "description": "Fetch new articles from all feeds (or one feed)",
+                "description": "Fetch new articles from all feeds (or one feed), then auto-classify",
                 "args": [
                     {"name": "--feed", "type": "integer", "required": false, "description": "Limit to one feed ID"}
                 ]
@@ -299,27 +294,16 @@ fn describe_commands() -> Value {
                 ]
             },
             {
-                "name": "analyze",
-                "description": "Run NER on articles to extract entities (person, org, concept)",
-                "args": [
-                    {"name": "--article", "type": "integer", "required": false, "description": "Analyze one article"},
-                    {"name": "--download-model", "type": "boolean", "required": false, "description": "Download NER model (~16MB)"}
-                ]
-            },
-            {
-                "name": "entities",
-                "description": "Query extracted entities",
-                "args": [
-                    {"name": "--entity-type", "type": "string", "required": false, "description": "Filter: person, organization, concept"},
-                    {"name": "--name", "type": "string", "required": false, "description": "Search by entity name"},
-                    {"name": "--related", "type": "string", "required": false, "description": "Find co-occurring entities"},
-                    {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"}
-                ]
-            },
-            {
                 "name": "folders",
-                "description": "Manage folders: list, suggest (AI), accept, create, remove, articles",
+                "description": "Manage folders: list, create, remove, articles <name>, reset",
                 "args": []
+            },
+            {
+                "name": "folders articles <name>",
+                "description": "List articles in a cognitive folder (新知/动态/深度/行动) or manual folder by ID",
+                "args": [
+                    {"name": "name", "type": "string", "required": true, "description": "Folder name or ID"}
+                ]
             },
             {
                 "name": "move-feed",
@@ -331,7 +315,7 @@ fn describe_commands() -> Value {
             },
             {
                 "name": "read-for-me",
-                "description": "Output unread articles in 4 dimensions: most_relevant, trending_now, cross_feed, safe_to_skip",
+                "description": "Output unread articles in 4 dimensions for LLM processing",
                 "args": [
                     {"name": "--since", "type": "string", "required": false, "description": "Time window (default 24h, e.g. 7d)"},
                     {"name": "--count", "type": "integer", "required": false, "description": "Max articles (default 100)"}
@@ -357,6 +341,68 @@ fn article_snippet(a: &rss_core::Article) -> Value {
         "published_at": a.published_at.map(|d| d.to_rfc3339()),
         "snippet": clean,
     })
+}
+
+/// Classify untagged articles (or all if force=true). Returns (classified_count, tag_count).
+fn classify_articles(db: &Database, force: bool, single_article: Option<i64>) -> Result<(usize, usize), String> {
+    if !rss_ner::is_embed_model_available() {
+        return Err("Embedding model not found. Run `rss _classify --download-model` first.".to_string());
+    }
+
+    if force && single_article.is_none() {
+        db.clear_all_tags().map_err(|e| format!("{}", e))?;
+    }
+
+    let articles_to_classify = match single_article {
+        Some(id) => {
+            match db.list_articles(None, false) {
+                Ok(all) => all.into_iter().filter(|a| a.id == id).collect::<Vec<_>>(),
+                Err(e) => return Err(format!("{}", e)),
+            }
+        }
+        None => {
+            if force {
+                db.list_articles(None, false).map_err(|e| format!("{}", e))?
+                    .into_iter()
+                    .filter(|a| a.content.is_some() || a.summary.is_some())
+                    .collect()
+            } else {
+                db.list_untagged_articles().map_err(|e| format!("{}", e))?
+            }
+        }
+    };
+
+    let total = articles_to_classify.len();
+    let mut total_tags = 0;
+
+    for a in &articles_to_classify {
+        let summary = a.content.as_deref()
+            .or(a.summary.as_deref())
+            .unwrap_or("");
+
+        match rss_ner::classify_article(&a.title, summary) {
+            Ok(tags) => {
+                total_tags += tags.len();
+                db.set_article_tags(a.id, &tags).ok();
+            }
+            Err(_) => {
+                // Mark as analyzed even if classification fails (empty tags)
+                db.set_article_tags(a.id, &[]).ok();
+            }
+        }
+    }
+
+    Ok((total, total_tags))
+}
+
+// ---------------------------------------------------------------------------
+// Cognitive folder names (fixed set)
+// ---------------------------------------------------------------------------
+
+const COGNITIVE_FOLDER_NAMES: &[&str] = &["新知", "动态", "深度", "行动"];
+
+fn is_cognitive_folder(name: &str) -> bool {
+    COGNITIVE_FOLDER_NAMES.contains(&name)
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +503,7 @@ fn main() -> ExitCode {
         }
 
         // ---------------------------------------------------------------
-        // FETCH
+        // FETCH (+ auto-classify new articles)
         // ---------------------------------------------------------------
         Commands::Fetch { feed } => {
             let feeds = match db.list_feeds() {
@@ -488,9 +534,18 @@ fn main() -> ExitCode {
                     }
                 }
             }
+
+            // Auto-classify new (untagged) articles
+            let classify_result = if rss_ner::is_embed_model_available() {
+                classify_articles(&db, false, None).ok()
+            } else {
+                None
+            };
+
             success("fetch", json!({
                 "feeds_fetched": results.len(),
                 "results": results,
+                "classified": classify_result.map(|(c, t)| json!({"articles": c, "tags": t})),
             }), vec![
                 action("rss articles --unread", "List unread articles", json!({})),
                 action("rss list", "List all feeds", json!({})),
@@ -498,7 +553,7 @@ fn main() -> ExitCode {
         }
 
         // ---------------------------------------------------------------
-        // ARTICLES  (Principle 4: default --count 30, truncated/total)
+        // ARTICLES
         // ---------------------------------------------------------------
         Commands::Articles { feed, unread, count } => {
             match db.list_articles(feed, unread) {
@@ -647,7 +702,7 @@ fn main() -> ExitCode {
         }
 
         // ---------------------------------------------------------------
-        // SEARCH  (Principle 4: default --count 30, truncated/total)
+        // SEARCH
         // ---------------------------------------------------------------
         Commands::Search { query, count } => {
             match db.search_articles(&query) {
@@ -685,7 +740,7 @@ fn main() -> ExitCode {
         }
 
         // ---------------------------------------------------------------
-        // FETCH-FULL-TEXT  (Principle 5: cache-aware extraction)
+        // FETCH-FULL-TEXT
         // ---------------------------------------------------------------
         Commands::FetchFullText { id } => {
             // Check cache first
@@ -736,60 +791,51 @@ fn main() -> ExitCode {
         }
 
         // ---------------------------------------------------------------
-        // ANALYZE
+        // _CLASSIFY (replaces _analyze)
         // ---------------------------------------------------------------
-        Commands::Analyze { article, download_model } => {
+        Commands::Classify { article, download_model, force } => {
             if download_model {
                 match rss_ner::download_model() {
-                    Ok(()) => return success("analyze", json!({"model_downloaded": true}), vec![
-                        action("rss analyze", "Run NER on unanalyzed articles", json!({})),
+                    Ok(()) => return success("classify", json!({"model_downloaded": true}), vec![
+                        action("rss _classify", "Classify untagged articles", json!({})),
                     ]),
-                    Err(e) => return error("analyze", &format!("Download failed: {}", e), "Check network connection"),
+                    Err(e) => return error("classify", &format!("Download failed: {}", e), "Check network connection"),
                 }
             }
 
-            let articles_to_analyze = match article {
-                Some(id) => {
-                    match db.list_articles(None, false) {
-                        Ok(all) => all.into_iter().filter(|a| a.id == id).collect::<Vec<_>>(),
-                        Err(e) => return error("analyze", &format!("{}", e), "Check article ID"),
-                    }
+            match classify_articles(&db, force, article) {
+                Ok((total, total_tags)) => {
+                    success("classify", json!({
+                        "articles_classified": total,
+                        "tags_assigned": total_tags,
+                    }), vec![
+                        action("rss folders articles 新知", "View novel discoveries", json!({})),
+                        action("rss folders articles 动态", "View updates", json!({})),
+                        action("rss folders articles 深度", "View deep reads", json!({})),
+                        action("rss folders articles 行动", "View actionable items", json!({})),
+                    ])
                 }
-                None => {
-                    match db.list_unanalyzed_articles() {
-                        Ok(a) => a,
-                        Err(e) => return error("analyze", &format!("{}", e), "Check database"),
-                    }
-                }
-            };
-
-            let total = articles_to_analyze.len();
-            let mut total_entities = 0;
-
-            for a in &articles_to_analyze {
-                let text = a.full_content.as_deref()
-                    .or(a.content.as_deref())
-                    .or(a.summary.as_deref())
-                    .unwrap_or(&a.title);
-
-                let entities = rss_ner::extract_entities(text);
-                let db_entities: Vec<(String, String, Option<String>, f32)> = entities.iter()
-                    .map(|e| (e.name.clone(), e.entity_type.clone(), None, e.score))
-                    .collect();
-
-                db.add_entities(a.id, &db_entities).ok();
-                db.mark_analyzed(a.id).ok();
-                total_entities += entities.len();
+                Err(e) => error("classify", &e, "Run `rss _classify --download-model` first"),
             }
+        }
 
-            success("analyze", json!({
-                "articles_analyzed": total,
-                "entities_found": total_entities,
-            }), vec![
-                action("rss entities", "View extracted entities", json!({})),
-                action("rss entities --entity-type concept", "View concepts", json!({})),
-                action("rss entities --entity-type organization", "View organizations", json!({})),
-            ])
+        // ---------------------------------------------------------------
+        // _TAG (manual tag override)
+        // ---------------------------------------------------------------
+        Commands::Tag { id, tags } => {
+            let tag_list: Vec<String> = tags.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            match db.set_article_tags(id, &tag_list) {
+                Ok(true) => success("tag", json!({
+                    "article_id": id,
+                    "tags": tag_list,
+                }), vec![]),
+                Ok(false) => error("tag", &format!("Article {} not found", id), "Use `rss articles` to find valid IDs"),
+                Err(e) => error("tag", &format!("{}", e), "Check article ID"),
+            }
         }
 
         // ---------------------------------------------------------------
@@ -825,7 +871,7 @@ fn main() -> ExitCode {
                                 .collect();
                             success("entities", json!({"entities": items, "count": items.len()}), vec![])
                         }
-                        Err(e) => error("entities", &format!("{}", e), "Run `rss analyze` first"),
+                        Err(e) => error("entities", &format!("{}", e), "Run `rss _classify` first"),
                     }
                 }
             } else {
@@ -834,11 +880,9 @@ fn main() -> ExitCode {
                         let items: Vec<Value> = results.iter()
                             .map(|(n, t, c, s)| json!({"name": n, "entity_type": t, "mentions": c, "avg_score": s}))
                             .collect();
-                        success("entities", json!({"entities": items, "count": items.len()}), vec![
-                            action("rss analyze", "Analyze more articles", json!({})),
-                        ])
+                        success("entities", json!({"entities": items, "count": items.len()}), vec![])
                     }
-                    Err(e) => error("entities", &format!("{}", e), "Run `rss analyze` first"),
+                    Err(e) => error("entities", &format!("{}", e), "Run `rss _classify` first"),
                 }
             }
         }
@@ -849,18 +893,34 @@ fn main() -> ExitCode {
         Commands::Folders { action: folder_action } => {
             match folder_action {
                 None => {
-                    match db.list_folders() {
-                        Ok(folders) => {
-                            let items: Vec<Value> = folders.iter()
-                                .map(|(id, name, ftype, query)| json!({"id": id, "name": name, "type": ftype, "query": query}))
-                                .collect();
-                            success("folders", json!({"folders": items, "count": items.len()}), vec![
-                                action("rss folders create <name> --smart <query>", "Create smart folder", json!({})),
-                                action("rss folders create <name> --feeds 1,2,3", "Create manual folder", json!({})),
-                            ])
-                        }
-                        Err(e) => error("folders", &format!("{}", e), "Check database"),
+                    // List: 4 fixed cognitive folders + manual folders from DB
+                    let mut items: Vec<Value> = Vec::new();
+
+                    // Add 4 fixed cognitive folders with article counts
+                    for name in COGNITIVE_FOLDER_NAMES {
+                        let count = db.count_articles_by_tag(name).unwrap_or(0);
+                        items.push(json!({
+                            "id": null,
+                            "name": name,
+                            "type": "cognitive",
+                            "article_count": count,
+                        }));
                     }
+
+                    // Add manual folders from DB
+                    if let Ok(folders) = db.list_folders() {
+                        for (id, name, ftype, query) in &folders {
+                            items.push(json!({"id": id, "name": name, "type": ftype, "query": query}));
+                        }
+                    }
+
+                    success("folders", json!({"folders": items, "count": items.len()}), vec![
+                        action("rss folders articles 新知", "View novel discoveries", json!({})),
+                        action("rss folders articles 动态", "View updates", json!({})),
+                        action("rss folders articles 深度", "View deep reads", json!({})),
+                        action("rss folders articles 行动", "View actionable items", json!({})),
+                        action("rss folders create <name>", "Create manual folder", json!({})),
+                    ])
                 }
                 Some(FolderAction::Create { name, smart, feeds }) => {
                     if let Some(ref query) = smart {
@@ -903,232 +963,60 @@ fn main() -> ExitCode {
                         Err(e) => error("folders", &format!("{}", e), "Check folder ID"),
                     }
                 }
-                Some(FolderAction::Articles { id, count }) => {
-                    match db.list_folders() {
-                        Ok(folders) => {
-                            if let Some((_, _, ftype, query)) = folders.iter().find(|(fid, _, _, _)| *fid == id) {
-                                let articles = if ftype == "smart" {
-                                    db.get_smart_folder_articles(query.as_deref().unwrap_or(""), count)
+                Some(FolderAction::Articles { name, count }) => {
+                    // Check if it's a cognitive folder name
+                    if is_cognitive_folder(&name) {
+                        match db.get_articles_by_tag(&name, count) {
+                            Ok(arts) => {
+                                let items: Vec<Value> = arts.iter()
+                                    .map(|a| serde_json::to_value(a).unwrap())
+                                    .collect();
+                                success("folders", json!({"folder_name": name, "articles": items, "count": items.len()}), vec![])
+                            }
+                            Err(e) => error("folders", &format!("{}", e), "Run `rss _classify` first"),
+                        }
+                    } else if let Ok(id) = name.parse::<i64>() {
+                        // Manual folder by ID
+                        match db.list_folders() {
+                            Ok(folders) => {
+                                if let Some((_, _, _ftype, _query)) = folders.iter().find(|(fid, _, _, _)| *fid == id) {
+                                    let articles = db.get_folder_feed_articles(id, count);
+                                    match articles {
+                                        Ok(arts) => {
+                                            let items: Vec<Value> = arts.iter()
+                                                .map(|a| serde_json::to_value(a).unwrap())
+                                                .collect();
+                                            success("folders", json!({"folder_id": id, "articles": items, "count": items.len()}), vec![])
+                                        }
+                                        Err(e) => error("folders", &format!("{}", e), "Check folder"),
+                                    }
                                 } else {
-                                    db.get_folder_feed_articles(id, count)
-                                };
-                                match articles {
-                                    Ok(arts) => {
-                                        let items: Vec<Value> = arts.iter()
-                                            .map(|a| serde_json::to_value(a).unwrap())
-                                            .collect();
-                                        success("folders", json!({"folder_id": id, "articles": items, "count": items.len()}), vec![])
-                                    }
-                                    Err(e) => error("folders", &format!("{}", e), "Check folder query"),
-                                }
-                            } else {
-                                error("folders", &format!("Folder {} not found", id), "Use `rss folders` to see IDs")
-                            }
-                        }
-                        Err(e) => error("folders", &format!("{}", e), "Check database"),
-                    }
-                }
-                Some(FolderAction::Suggest) => {
-                    // Try semantic clustering first (if embedding model available)
-                    if rss_ner::is_embed_model_available() {
-                        // Get all articles with their entities as text
-                        let entity_groups = db.list_entities_grouped(None, None, 200).unwrap_or_default();
-                        if entity_groups.is_empty() {
-                            return error("folders", "No entity data. Run `rss analyze` first", "Run `rss analyze` to extract entities from articles");
-                        }
-
-                        // Build per-article entity strings
-                        let mut article_entities: Vec<(i64, String)> = Vec::new();
-                        let articles = db.list_articles(None, false).unwrap_or_default();
-                        for a in &articles {
-                            // Get entities for this article
-                            let mut ents = Vec::new();
-                            // Use title + top entities as the text to embed
-                            ents.push(a.title.clone());
-                            if let Ok(mentions) = db.get_article_entities(a.id) {
-                                for name in mentions.iter().take(5) {
-                                    ents.push(name.clone());
+                                    error("folders", &format!("Folder {} not found", id), "Use `rss folders` to see IDs")
                                 }
                             }
-                            if ents.len() > 1 { // has at least one entity beyond title
-                                article_entities.push((a.id, ents.join(" ")));
-                            }
+                            Err(e) => error("folders", &format!("{}", e), "Check database"),
                         }
-
-                        if !article_entities.is_empty() {
-                            match rss_ner::suggest_topics(&article_entities) {
-                                Ok(clusters) if !clusters.is_empty() => {
-                                    let rejected = db.get_rejected_entities().unwrap_or_default();
-                                    let items: Vec<Value> = clusters.iter().enumerate()
-                                        .filter(|(_, (label, _))| !rejected.iter().any(|r| r.eq_ignore_ascii_case(label)))
-                                        .take(4)
-                                        .map(|(i, (label, ids))| json!({
-                                            "index": i,
-                                            "name": label,
-                                            "article_count": ids.len(),
-                                            "query": label,
-                                            "method": "semantic",
-                                        }))
-                                        .collect();
-                                    if !items.is_empty() {
-                                        return success("folders", json!({
-                                            "action": "suggest",
-                                            "suggestions": items,
-                                            "count": items.len(),
-                                            "max": 4,
-                                            "method": "semantic_clustering",
-                                            "action_required": "Review suggestions, then run `rss folders accept` to create them.",
-                                        }), vec![
-                                            action("rss folders accept", "Accept all suggestions", json!({})),
-                                            action("rss folders accept --except 2", "Accept all except index 2", json!({})),
-                                            action("rss folders reject 0", "Reject a suggestion", json!({})),
-                                        ]);
-                                    }
-                                }
-                                _ => {} // fall through to keyword-based
-                            }
-                        }
-                    }
-
-                    // Fallback: keyword frequency based suggestions
-                    match db.suggest_smart_folders(4) {
-                        Ok(suggestions) => {
-                            if suggestions.is_empty() {
-                                return error("folders", "No entity data. Run `rss analyze` first", "Run `rss analyze` to extract entities from articles");
-                            }
-                            let items: Vec<Value> = suggestions.iter().enumerate()
-                                .map(|(i, (name, related, count, query))| json!({
-                                    "index": i,
-                                    "name": name,
-                                    "related_entities": related,
-                                    "article_count": count,
-                                    "query": query,
-                                    "method": "keyword",
-                                }))
-                                .collect();
-                            success("folders", json!({
-                                "action": "suggest",
-                                "suggestions": items,
-                                "count": items.len(),
-                                "max": 4,
-                                "method": "keyword_frequency",
-                                "action_required": "Review suggestions, then run `rss folders accept` to create them.",
-                            }), vec![
-                                action("rss folders accept", "Accept all suggestions", json!({})),
-                                action("rss folders accept --except 2", "Accept all except index 2", json!({})),
-                                action("rss folders reject 0", "Reject a suggestion", json!({})),
-                            ])
-                        }
-                        Err(e) => error("folders", &format!("{}", e), "Run `rss analyze` first"),
+                    } else {
+                        error("folders", &format!("Unknown folder: {}. Use one of: 新知, 动态, 深度, 行动, or a numeric folder ID", name), "Use `rss folders` to list available folders")
                     }
                 }
-                Some(FolderAction::Accept { except }) => {
-                    // First generate suggestions
-                    let suggestions = match db.suggest_smart_folders(4) {
-                        Ok(s) => s,
-                        Err(e) => return error("folders", &format!("{}", e), "Run `rss folders suggest` first"),
+                Some(FolderAction::Reset) => {
+                    // Clear all tags and re-classify
+                    let cleared = db.clear_all_tags().unwrap_or(0);
+
+                    let classify_result = if rss_ner::is_embed_model_available() {
+                        classify_articles(&db, true, None).ok()
+                    } else {
+                        None
                     };
-                    if suggestions.is_empty() {
-                        return error("folders", "No suggestions available", "Run `rss analyze` then `rss folders suggest`");
-                    }
-
-                    // Parse except indices
-                    let except_indices: Vec<usize> = except
-                        .unwrap_or_default()
-                        .split(',')
-                        .filter_map(|s| s.trim().parse::<usize>().ok())
-                        .collect();
-
-                    match db.accept_suggested_folders(&suggestions, &except_indices) {
-                        Ok(created) => {
-                            let items: Vec<Value> = created.iter()
-                                .map(|(id, name)| json!({"folder_id": id, "name": name}))
-                                .collect();
-                            success("folders", json!({
-                                "action": "accepted",
-                                "created": items,
-                                "count": items.len(),
-                                "skipped": except_indices.len(),
-                            }), vec![
-                                action("rss folders", "List all folders", json!({})),
-                            ])
-                        }
-                        Err(e) => error("folders", &format!("{}", e), "Check database"),
-                    }
-                }
-                Some(FolderAction::Reject { indices }) => {
-                    // Get current suggestions to map indices to names
-                    let suggestions = match db.suggest_smart_folders(4) {
-                        Ok(s) => s,
-                        Err(e) => return error("folders", &format!("{}", e), "Run `rss folders suggest` first"),
-                    };
-                    if suggestions.is_empty() {
-                        return error("folders", "No suggestions to reject", "Run `rss analyze` then `rss folders suggest`");
-                    }
-
-                    // Parse indices, or reject all if omitted
-                    let reject_indices: Vec<usize> = match indices {
-                        Some(ref s) => s.split(',')
-                            .filter_map(|i| i.trim().parse::<usize>().ok())
-                            .collect(),
-                        None => (0..suggestions.len()).collect(),
-                    };
-
-                    let rejected_names: Vec<String> = reject_indices.iter()
-                        .filter_map(|&i| suggestions.get(i).map(|(name, _, _, _)| name.clone()))
-                        .collect();
-
-                    // Build full context for downstream LLM/harness
-                    let all_suggestions: Vec<Value> = suggestions.iter()
-                        .map(|(name, related, count, query)| json!({
-                            "name": name, "related": related, "articles": count, "query": query
-                        }))
-                        .collect();
-
-                    match db.reject_entities(&rejected_names) {
-                        Ok(count) => {
-                            success("folders", json!({
-                                "action": "rejected",
-                                "rejected": rejected_names,
-                                "count": count,
-                                "all_suggestions": all_suggestions,
-                                "awaiting_input": true,
-                                "prompt": "Why did you reject these? Describe what topics you care about, and pipe to an LLM for better suggestions.",
-                                "pipe_hint": "rss folders reject 2 | claude 'User rejected these folder suggestions. Based on their feedback, suggest 4 better topic folders from the entity data.'",
-                            }), vec![
-                                action("rss folders suggest", "Get new suggestions (excluding rejected)", json!({})),
-                                action("rss folders reject | claude \"I want folders about AI and startups, not generic brands\"", "Let LLM refine based on your preference", json!({})),
-                            ])
-                        }
-                        Err(e) => error("folders", &format!("{}", e), "Check database"),
-                    }
-                }
-                Some(FolderAction::Reset { reason }) => {
-                    // 1. Delete all smart folders + store reason
-                    let deleted = db.reset_smart_folders(&reason).unwrap_or(0);
-
-                    // 2. Re-suggest immediately
-                    let new_suggestions = db.suggest_smart_folders(4).unwrap_or_default();
-                    let items: Vec<Value> = new_suggestions.iter().enumerate()
-                        .map(|(i, (name, related, count, query))| json!({
-                            "index": i,
-                            "name": name,
-                            "related_entities": related,
-                            "article_count": count,
-                            "query": query,
-                        }))
-                        .collect();
 
                     success("folders", json!({
                         "action": "reset",
-                        "deleted": deleted,
-                        "reason": reason,
-                        "new_suggestions": items,
-                        "suggestion_count": items.len(),
-                        "action_required": "Review new suggestions, then accept or reset again.",
+                        "tags_cleared": cleared,
+                        "reclassified": classify_result.map(|(c, t)| json!({"articles": c, "tags": t})),
                     }), vec![
-                        action("rss folders accept", "Accept new suggestions", json!({})),
-                        action("rss folders reset --reason \"...\"", "Reset again with new feedback", json!({})),
+                        action("rss folders articles 新知", "View novel discoveries", json!({})),
+                        action("rss folders articles 动态", "View updates", json!({})),
                     ])
                 }
             }
@@ -1185,15 +1073,14 @@ fn main() -> ExitCode {
                         .map(|(n, t, c, s)| json!({"name": n, "type": t, "mentions": c, "score": s}))
                         .collect();
 
-                    // Dimension 3: Cross-feed connections (articles sharing entities across different feeds)
-                    // Simplified: articles that share entities with starred/read articles
+                    // Dimension 3: Cross-feed connections
                     let important: Vec<Value> = recent.iter()
                         .filter(|a| !a.is_starred)
                         .take(8)
                         .map(|a| article_snippet(a))
                         .collect();
 
-                    // Dimension 4: Safe to skip (remaining, lowest priority)
+                    // Dimension 4: Safe to skip
                     let skip_count = recent.len().saturating_sub(starred.len() + important.len());
 
                     success("read-for-me", json!({
@@ -1212,7 +1099,7 @@ fn main() -> ExitCode {
                                 "count": important.len(),
                             },
                             "cross_feed": {
-                                "description": "Concepts appearing across multiple feeds — potential deep insights",
+                                "description": "Concepts appearing across multiple feeds",
                                 "entities": top_entities.iter()
                                     .filter(|(_, _, c, _)| *c >= 3)
                                     .take(4)
@@ -1224,10 +1111,8 @@ fn main() -> ExitCode {
                                 "count": skip_count,
                             },
                         },
-                        "hint": "4 dimensions: most_relevant, trending_now, cross_feed, safe_to_skip. Pipe to LLM for personalized filtering.",
                     }), vec![
                         action("rss read-for-me | claude \"based on these 4 dimensions, what should I read today?\"", "AI daily briefing", json!({})),
-                        action("rss analyze", "Run NER on new articles first", json!({})),
                     ])
                 }
                 Err(e) => error("read-for-me", &format!("{}", e), "Check database"),
