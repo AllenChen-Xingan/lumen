@@ -1,0 +1,251 @@
+:root {
+  --bg: #fafafa;
+  --fg: #1a1a1a;
+  --border: #e0e0e0;
+  --accent: #0066cc;
+  --unread: #1a1a1a;
+  --read: #666;
+  --pane-bg: #fff;
+  --hover: #f0f0f0;
+  --focus: #0066cc;
+  --star: #d4a017;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a1a;
+    --fg: #e8e8e8;
+    --border: #333;
+    --accent: #4da6ff;
+    --unread: #e8e8e8;
+    --read: #888;
+    --pane-bg: #222;
+    --hover: #2a2a2a;
+    --star: #ffd700;
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.status-bar {
+  padding: 4px 12px;
+  font-size: 0.85rem;
+  background: var(--pane-bg);
+  border-bottom: 1px solid var(--border);
+  min-height: 28px;
+}
+
+.layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.feeds-pane {
+  width: 220px;
+  min-width: 180px;
+}
+
+.articles-pane {
+  width: 320px;
+  min-width: 240px;
+}
+
+.reader-pane {
+  flex: 1;
+  border-right: none;
+  padding: 24px;
+}
+
+.pane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--pane-bg);
+  position: sticky;
+  top: 0;
+}
+
+.pane-header h2 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.add-feed-form {
+  display: flex;
+  padding: 8px;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.add-feed-form input {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 0.85rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--pane-bg);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+button:hover {
+  background: var(--hover);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+ul {
+  list-style: none;
+}
+
+li[role="option"] {
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+
+li[role="option"]:hover {
+  background: var(--hover);
+}
+
+li[role="option"][aria-selected="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+
+li[role="option"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.unread .article-title {
+  font-weight: 600;
+  color: var(--unread);
+}
+
+.read .article-title {
+  color: var(--read);
+}
+
+.article-status {
+  font-size: 0.6rem;
+  width: 10px;
+}
+
+.article-star {
+  color: var(--star);
+  width: 14px;
+}
+
+.reader-pane article header {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.reader-pane h1 {
+  font-size: 1.4rem;
+  line-height: 1.3;
+  margin-bottom: 8px;
+}
+
+.article-meta {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.article-meta a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.article-meta a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.article-content {
+  font-size: 1rem;
+  line-height: 1.7;
+  max-width: 65ch;
+}
+
+.article-content img {
+  max-width: 100%;
+  height: auto;
+}
+
+.article-content a {
+  color: var(--accent);
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--read);
+}
+
+input:focus-visible,
+[role="listbox"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}

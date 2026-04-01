@@ -4,5 +4,6 @@ members = [
     "crates/rss-store",
     "crates/rss-fetch",
     "crates/rss-cli",
+    "src-tauri",
 ]
 resolver = "2"
