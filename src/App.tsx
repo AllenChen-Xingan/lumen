@@ -215,13 +215,25 @@ export default function App() {
     if (!menu) return [];
     if (menu.type === "feed") {
       return [
+        ...manualFolders().map(f => ({
+          label: `Move to ${f.name}`,
+          action: async () => {
+            try {
+              await invoke("move_feed", { feedId: menu.id, folderId: f.id });
+              setStatus(`Moved feed to ${f.name}`);
+              await loadFeeds();
+            } catch (e) { setStatus(`Error: ${e}`); }
+            closeContextMenu();
+          },
+        })),
         {
-          label: "Move to folder...",
-          action: () => {
-            // TODO: implement move_feed invoke when Tauri command exists
-            // For now, show available folders in status
-            const folderNames = manualFolders().map(f => f.name).join(", ") || "No folders";
-            setStatus(`Move feed: available folders: ${folderNames}. (Not yet implemented)`);
+          label: "Uncategorize",
+          action: async () => {
+            try {
+              await invoke("move_feed", { feedId: menu.id, folderId: null });
+              setStatus("Feed uncategorized");
+              await loadFeeds();
+            } catch (e) { setStatus(`Error: ${e}`); }
             closeContextMenu();
           },
         },
@@ -246,9 +258,13 @@ export default function App() {
         },
         {
           label: "Delete folder",
-          action: () => {
-            // TODO: implement delete_folder invoke when Tauri command exists
-            setStatus("Delete folder: not yet implemented");
+          action: async () => {
+            try {
+              await invoke("delete_folder", { id: menu.id });
+              setStatus("Folder deleted");
+              await loadFolders();
+              await loadFeeds();
+            } catch (e) { setStatus(`Error: ${e}`); }
             closeContextMenu();
           },
         },
@@ -611,9 +627,17 @@ export default function App() {
         if (feedId) {
           removeFeed(parseInt(feedId));
         }
-        // TODO: delete manual folder when delete_folder command exists
-        // const folderId = el?.dataset.folderId;
-        // if (folderId) { deleteFolder(parseInt(folderId)); }
+        const folderId = el?.dataset.folderId;
+        if (folderId) {
+          const folder = folders().find(f => f.id === parseInt(folderId));
+          if (folder && folder.type === "manual") {
+            invoke("delete_folder", { id: parseInt(folderId) }).then(() => {
+              setStatus("Folder deleted");
+              loadFolders();
+              loadFeeds();
+            }).catch(e => setStatus(`Error: ${e}`));
+          }
+        }
       }
       else if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
         // Open context menu at current item position

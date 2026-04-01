@@ -257,6 +257,37 @@ fn analyze_articles() -> Result<AnalyzeResult, String> {
     Ok(analyze)
 }
 
+#[tauri::command]
+fn create_folder(name: String) -> Result<Folder, String> {
+    let result = cli(&["folders", "create", &name])?;
+    let id = result["id"].as_i64().ok_or("Missing folder id")?;
+    let folder_name = result["name"].as_str().unwrap_or(&name).to_string();
+    Ok(Folder {
+        id,
+        name: folder_name,
+        folder_type: "manual".to_string(),
+        query: None,
+    })
+}
+
+#[tauri::command]
+fn delete_folder(id: i64) -> Result<bool, String> {
+    cli(&["folders", "remove", &id.to_string()])?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn move_feed(feed_id: i64, folder_id: Option<i64>) -> Result<bool, String> {
+    let mut args = vec!["move-feed".to_string(), feed_id.to_string()];
+    if let Some(fid) = folder_id {
+        args.push("--folder".to_string());
+        args.push(fid.to_string());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    cli(&arg_refs)?;
+    Ok(true)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -277,6 +308,9 @@ fn main() {
             list_folders,
             folder_articles,
             analyze_articles,
+            create_folder,
+            delete_folder,
+            move_feed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
