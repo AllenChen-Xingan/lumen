@@ -984,15 +984,26 @@ fn main() -> ExitCode {
                         .filter_map(|&i| suggestions.get(i).map(|(name, _, _, _)| name.clone()))
                         .collect();
 
+                    // Build full context for downstream LLM/harness
+                    let all_suggestions: Vec<Value> = suggestions.iter()
+                        .map(|(name, related, count, query)| json!({
+                            "name": name, "related": related, "articles": count, "query": query
+                        }))
+                        .collect();
+
                     match db.reject_entities(&rejected_names) {
                         Ok(count) => {
                             success("folders", json!({
                                 "action": "rejected",
                                 "rejected": rejected_names,
                                 "count": count,
-                                "effect": "These entities will be excluded from future suggestions",
+                                "all_suggestions": all_suggestions,
+                                "awaiting_input": true,
+                                "prompt": "Why did you reject these? Describe what topics you care about, and pipe to an LLM for better suggestions.",
+                                "pipe_hint": "rss folders reject 2 | claude 'User rejected these folder suggestions. Based on their feedback, suggest 4 better topic folders from the entity data.'",
                             }), vec![
                                 action("rss folders suggest", "Get new suggestions (excluding rejected)", json!({})),
+                                action("rss folders reject | claude \"I want folders about AI and startups, not generic brands\"", "Let LLM refine based on your preference", json!({})),
                             ])
                         }
                         Err(e) => error("folders", &format!("{}", e), "Check database"),
