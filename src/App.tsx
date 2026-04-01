@@ -249,6 +249,14 @@ export default function App() {
         prev.map((a) => (a.id === article.id ? { ...a, is_read: true } : a))
       );
     }
+    // Auto-fetch full text in background (optimistic UI)
+    if (article.url) {
+      fetchFullText(article.id);
+    }
+    // Prefetch nearby articles
+    if (index !== undefined) {
+      prefetchNearby(index);
+    }
     requestAnimationFrame(() => readerRef?.focus());
   };
 
@@ -263,11 +271,6 @@ export default function App() {
     }
   };
 
-  const contentSeemsTruncated = (article: Article): boolean => {
-    const content = article.content || article.summary || "";
-    return content.length < 500;
-  };
-
   const fetchFullText = async (articleId: number) => {
     setFullTextLoading(true);
     setFullTextError(null);
@@ -278,6 +281,17 @@ export default function App() {
       setFullTextError(`${e}`);
     } finally {
       setFullTextLoading(false);
+    }
+  };
+
+  const prefetchNearby = (currentIndex: number) => {
+    const list = articles();
+    for (const offset of [-1, 1, 2]) {
+      const i = currentIndex + offset;
+      if (i >= 0 && i < list.length && list[i].url) {
+        // Silent prefetch — ignore errors, results cached in DB
+        invoke("fetch_full_text", { id: list[i].id }).catch(() => {});
+      }
     }
   };
 
@@ -373,12 +387,6 @@ export default function App() {
       else if (e.key === "k") { e.preventDefault(); navigateArticle(-1); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
       else if (e.key === "n") { navigateUnread("next"); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
       else if (e.key === "p") { navigateUnread("prev"); const a = articles()[selectedArticleIndex()]; if (a) selectArticle(a, selectedArticleIndex()); }
-      else if (e.key === "f") {
-        const a = selectedArticle();
-        if (a && !fullText() && !fullTextLoading()) {
-          fetchFullText(a.id);
-        }
-      }
     }
   };
 
@@ -660,15 +668,6 @@ export default function App() {
                     >
                       {article().is_starred ? "\u2605 Starred" : "\u2606 Star"}
                     </button>
-                    <Show when={!fullText() && article().url}>
-                      <button
-                        onClick={() => fetchFullText(article().id)}
-                        disabled={fullTextLoading()}
-                        aria-label="Fetch full article text"
-                      >
-                        {fullTextLoading() ? "Loading..." : "Full Text"}
-                      </button>
-                    </Show>
                     <Show when={fullTextError()}>
                       <span class="error-text" role="alert">{fullTextError()}</span>
                     </Show>

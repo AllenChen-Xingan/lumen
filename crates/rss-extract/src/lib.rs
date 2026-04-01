@@ -1,5 +1,8 @@
 use std::process::Command;
 
+const NORMAL_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const GOOGLEBOT_UA: &str = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+
 pub struct ExtractedContent {
     pub html: String,
     pub text_len: usize,
@@ -9,27 +12,38 @@ pub struct ExtractedContent {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExtractSource {
     Legible,
+    LegibleGooglebot,
     AgentBrowser,
 }
 
-/// Two-tier full-text extraction: legible (fast) → agent-browser (fallback).
+/// Three-tier full-text extraction: normal UA → Googlebot UA → agent-browser.
 pub fn extract_full_text(url: &str) -> Result<ExtractedContent, Box<dyn std::error::Error>> {
-    let html = fetch_html(url)?;
-
-    // Fast path: legible (~ms)
-    if let Ok(content) = try_legible(&html, url) {
-        if content.text_len >= 100 {
-            return Ok(content);
+    // Tier 1: Normal UA + legible (~ms)
+    if let Ok(html) = fetch_with_ua(url, NORMAL_UA) {
+        if let Ok(content) = try_legible(&html, url) {
+            if content.text_len >= 100 {
+                return Ok(content);
+            }
         }
     }
 
-    // Fallback: agent-browser for JS-rendered pages (~seconds)
+    // Tier 2: Googlebot UA + legible (~ms, catches SSR pages)
+    if let Ok(html) = fetch_with_ua(url, GOOGLEBOT_UA) {
+        if let Ok(mut content) = try_legible(&html, url) {
+            if content.text_len >= 100 {
+                content.source = ExtractSource::LegibleGooglebot;
+                return Ok(content);
+            }
+        }
+    }
+
+    // Tier 3: agent-browser for true JS-only pages (~seconds)
     try_agent_browser(url)
 }
 
-fn fetch_html(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn fetch_with_ua(url: &str, ua: &str) -> Result<String, Box<dyn std::error::Error>> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS-Reader/1.0")
+        .user_agent(ua)
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let text = client.get(url).send()?.text()?;
