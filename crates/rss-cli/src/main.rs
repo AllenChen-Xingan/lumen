@@ -899,6 +899,68 @@ fn main() -> ExitCode {
                     }
                 }
                 Some(FolderAction::Suggest) => {
+                    // Try semantic clustering first (if embedding model available)
+                    if rss_ner::is_embed_model_available() {
+                        // Get all articles with their entities as text
+                        let entity_groups = db.list_entities_grouped(None, None, 200).unwrap_or_default();
+                        if entity_groups.is_empty() {
+                            return error("folders", "No entity data. Run `rss analyze` first", "Run `rss analyze` to extract entities from articles");
+                        }
+
+                        // Build per-article entity strings
+                        let mut article_entities: Vec<(i64, String)> = Vec::new();
+                        let articles = db.list_articles(None, false).unwrap_or_default();
+                        for a in &articles {
+                            // Get entities for this article
+                            let mut ents = Vec::new();
+                            // Use title + top entities as the text to embed
+                            ents.push(a.title.clone());
+                            if let Ok(mentions) = db.get_article_entities(a.id) {
+                                for name in mentions.iter().take(5) {
+                                    ents.push(name.clone());
+                                }
+                            }
+                            if ents.len() > 1 { // has at least one entity beyond title
+                                article_entities.push((a.id, ents.join(" ")));
+                            }
+                        }
+
+                        if !article_entities.is_empty() {
+                            match rss_ner::suggest_topics(&article_entities) {
+                                Ok(clusters) if !clusters.is_empty() => {
+                                    let rejected = db.get_rejected_entities().unwrap_or_default();
+                                    let items: Vec<Value> = clusters.iter().enumerate()
+                                        .filter(|(_, (label, _))| !rejected.iter().any(|r| r.eq_ignore_ascii_case(label)))
+                                        .take(4)
+                                        .map(|(i, (label, ids))| json!({
+                                            "index": i,
+                                            "name": label,
+                                            "article_count": ids.len(),
+                                            "query": label,
+                                            "method": "semantic",
+                                        }))
+                                        .collect();
+                                    if !items.is_empty() {
+                                        return success("folders", json!({
+                                            "action": "suggest",
+                                            "suggestions": items,
+                                            "count": items.len(),
+                                            "max": 4,
+                                            "method": "semantic_clustering",
+                                            "action_required": "Review suggestions, then run `rss folders accept` to create them.",
+                                        }), vec![
+                                            action("rss folders accept", "Accept all suggestions", json!({})),
+                                            action("rss folders accept --except 2", "Accept all except index 2", json!({})),
+                                            action("rss folders reject 0", "Reject a suggestion", json!({})),
+                                        ]);
+                                    }
+                                }
+                                _ => {} // fall through to keyword-based
+                            }
+                        }
+                    }
+
+                    // Fallback: keyword frequency based suggestions
                     match db.suggest_smart_folders(4) {
                         Ok(suggestions) => {
                             if suggestions.is_empty() {
@@ -911,6 +973,7 @@ fn main() -> ExitCode {
                                     "related_entities": related,
                                     "article_count": count,
                                     "query": query,
+                                    "method": "keyword",
                                 }))
                                 .collect();
                             success("folders", json!({
@@ -918,11 +981,12 @@ fn main() -> ExitCode {
                                 "suggestions": items,
                                 "count": items.len(),
                                 "max": 4,
-                                "action_required": "Review suggestions, then run `rss folders accept` to create them. Use --except to skip specific indices.",
+                                "method": "keyword_frequency",
+                                "action_required": "Review suggestions, then run `rss folders accept` to create them.",
                             }), vec![
                                 action("rss folders accept", "Accept all suggestions", json!({})),
                                 action("rss folders accept --except 2", "Accept all except index 2", json!({})),
-                                action("rss folders suggest", "Re-generate suggestions", json!({})),
+                                action("rss folders reject 0", "Reject a suggestion", json!({})),
                             ])
                         }
                         Err(e) => error("folders", &format!("{}", e), "Run `rss analyze` first"),
