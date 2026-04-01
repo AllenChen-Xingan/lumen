@@ -456,7 +456,7 @@ export default function App() {
               id="feed-all"
               role="option"
               class="all-articles-item feed-button"
-              tabindex={0}
+              tabindex={selectedFeedIndex() === 0 ? 0 : -1}
               aria-selected={selectedFeed() === null}
               onClick={() => loadAllArticles()}
               onKeyDown={(e) => {
@@ -481,7 +481,7 @@ export default function App() {
                     id={`feed-${feed.id}`}
                     role="option"
                     class="feed-button"
-                    tabindex={0}
+                    tabindex={selectedFeedIndex() === index() + 1 ? 0 : -1}
                     aria-selected={selectedFeed() === feed.id}
                     aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
                     onClick={() => selectFeed(feed, index() + 1)}
@@ -554,7 +554,7 @@ export default function App() {
                     role="option"
                     aria-selected={selectedArticle()?.id === article.id}
                     aria-label={`${article.title}, ${article.is_read ? "read" : "unread"}${article.is_starred ? ", starred" : ""}`}
-                    tabindex={0}
+                    tabindex={selectedArticleIndex() === index() ? 0 : -1}
                     class={`article-item ${article.is_read ? "read" : "unread"}`}
                     onClick={() => selectArticle(article, index())}
                     onKeyDown={(e) => {
