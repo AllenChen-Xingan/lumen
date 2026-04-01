@@ -63,6 +63,9 @@ enum Commands {
         query: String,
         #[arg(long, default_value_t = 30)]
         count: usize,
+        /// Filter by feed ID
+        #[arg(long)]
+        feed: Option<i64>,
         /// Time filter: "24h", "7d", "30d"
         #[arg(long)]
         since: Option<String>,
@@ -72,24 +75,18 @@ enum Commands {
     },
     /// Fetch full-text content for an article (cached)
     FetchFullText { id: i64 },
-    /// Internal: classify articles into cognitive folders
-    #[command(name = "_classify", hide = true)]
-    Classify {
+    /// Internal: annotate articles with fact-based features (length, has_code, has_steps, etc)
+    #[command(name = "_annotate", hide = true)]
+    Annotate {
         #[arg(long)]
         article: Option<i64>,
-        #[arg(long)]
-        download_model: bool,
-        /// Force re-classify all articles (clear existing tags first)
+        /// Force re-annotate all articles (clear existing tags first)
         #[arg(long)]
         force: bool,
     },
-    /// Internal: manually set tags on an article
-    #[command(name = "_tag", hide = true)]
-    Tag {
-        id: i64,
-        #[arg(long)]
-        tags: String,
-    },
+    /// Internal: per-tag engagement diagnostics (read/star/deep-read rates)
+    #[command(name = "_classify_stats", hide = true)]
+    ClassifyStats,
     /// Internal: generate tldr for articles that don't have one
     #[command(name = "_summarize", hide = true)]
     Summarize,
@@ -139,13 +136,11 @@ enum FolderAction {
     Remove { id: i64 },
     /// List articles in a folder: by ID (manual folders) or by name (cognitive folders)
     Articles {
-        /// Folder name (新知/动态/深度/行动) or numeric ID for manual folders
+        /// Smart view name (unread/long/tutorial/recent) or numeric ID for manual folders
         name: String,
         #[arg(long, default_value_t = 30)]
         count: usize,
     },
-    /// Reset: clear all tags and re-classify
-    Reset,
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +314,7 @@ fn describe_commands() -> Value {
             },
             {
                 "name": "folders articles <name>",
-                "description": "List articles in a cognitive folder (新知/动态/深度/行动) or manual folder by ID",
+                "description": "List articles in a smart view (unread/long/tutorial/recent) or manual folder by ID",
                 "args": [
                     {"name": "name", "type": "string", "required": true, "description": "Folder name or ID"}
                 ]
@@ -437,17 +432,16 @@ fn compact_article(a: &rss_core::Article, db: &Database) -> Value {
     })
 }
 
-/// Classify untagged articles (or all if force=true). Returns (classified_count, tag_count).
-fn classify_articles(db: &Database, force: bool, single_article: Option<i64>) -> Result<(usize, usize), String> {
-    if !rss_ner::is_embed_model_available() {
-        return Err("Embedding model not found. Run `rss _classify --download-model` first.".to_string());
-    }
+// ── Fact-based annotation: deterministic text feature detection ──
 
+/// Annotate articles with factual features. No AI, no guessing.
+/// Returns (annotated_count, tag_count).
+fn annotate_articles(db: &Database, force: bool, single_article: Option<i64>) -> Result<(usize, usize), String> {
     if force && single_article.is_none() {
         db.clear_all_tags().map_err(|e| format!("{}", e))?;
     }
 
-    let articles_to_classify = match single_article {
+    let articles = match single_article {
         Some(id) => {
             match db.list_articles(None, false) {
                 Ok(all) => all.into_iter().filter(|a| a.id == id).collect::<Vec<_>>(),
@@ -457,47 +451,43 @@ fn classify_articles(db: &Database, force: bool, single_article: Option<i64>) ->
         None => {
             if force {
                 db.list_articles(None, false).map_err(|e| format!("{}", e))?
-                    .into_iter()
-                    .filter(|a| a.content.is_some() || a.summary.is_some())
-                    .collect()
             } else {
                 db.list_untagged_articles().map_err(|e| format!("{}", e))?
             }
         }
     };
 
-    let total = articles_to_classify.len();
+    let total = articles.len();
     let mut total_tags = 0;
 
-    for a in &articles_to_classify {
-        let summary = a.content.as_deref()
+    for a in &articles {
+        let content = a.full_content.as_deref()
+            .or(a.content.as_deref())
             .or(a.summary.as_deref())
             .unwrap_or("");
 
-        match rss_ner::classify_article(&a.title, summary) {
-            Ok(tags) => {
-                total_tags += tags.len();
-                let tags_str = tags.iter().map(|t| t.tag.as_str()).collect::<Vec<_>>().join(",");
-                db.set_article_tags(a.id, &tags_str).ok();
-            }
-            Err(_) => {
-                // Mark as analyzed even if classification fails (empty tags)
-                db.set_article_tags(a.id, "").ok();
-            }
-        }
+        let features = rss_ner::detect_features(&a.title, content);
+        let tags_str = rss_ner::features_to_tags(&features);
+        total_tags += tags_str.matches(',').count() + 1;
+        db.set_article_tags(a.id, &tags_str).ok();
     }
 
     Ok((total, total_tags))
 }
 
 // ---------------------------------------------------------------------------
-// Cognitive folder names (fixed set)
+// Smart view names (fact-based, deterministic)
 // ---------------------------------------------------------------------------
 
-const COGNITIVE_FOLDER_NAMES: &[&str] = &["新知", "动态", "深度", "行动"];
+const SMART_VIEW_NAMES: &[(&str, &str)] = &[
+    ("unread", "Unread articles"),
+    ("long", "Long-form articles"),
+    ("tutorial", "Articles with code or steps"),
+    ("recent", "Today's articles"),
+];
 
-fn is_cognitive_folder(name: &str) -> bool {
-    COGNITIVE_FOLDER_NAMES.contains(&name)
+fn is_smart_view(name: &str) -> bool {
+    SMART_VIEW_NAMES.iter().any(|(n, _)| *n == name)
 }
 
 // ---------------------------------------------------------------------------
@@ -638,12 +628,8 @@ fn main() -> ExitCode {
                 }
             }
 
-            // Auto-classify new (untagged) articles
-            let classify_result = if rss_ner::is_embed_model_available() {
-                classify_articles(&db, false, None).ok()
-            } else {
-                None
-            };
+            // Auto-annotate new (untagged) articles with fact-based features
+            let annotate_result = annotate_articles(&db, false, None).ok();
 
             // Auto-generate tldr for articles that don't have one yet
             let mut tldrs_generated = 0;
@@ -659,7 +645,7 @@ fn main() -> ExitCode {
             success("fetch", json!({
                 "feeds_fetched": results.len(),
                 "results": results,
-                "classified": classify_result.map(|(c, t)| json!({"articles": c, "tags": t})),
+                "annotated": annotate_result.map(|(c, t)| json!({"articles": c, "tags": t})),
                 "tldrs_generated": tldrs_generated,
             }), vec![
                 action("rss articles --unread", "List unread articles", json!({})),
@@ -859,11 +845,11 @@ fn main() -> ExitCode {
         // ---------------------------------------------------------------
         // SEARCH
         // ---------------------------------------------------------------
-        Commands::Search { query, count, since, compact } => {
+        Commands::Search { query, count, feed, since, compact } => {
             let search_result = if let Some(ref since_str) = since {
-                db.search_articles_since(&query, since_str, count)
+                db.search_articles_since(&query, since_str, count, feed)
             } else {
-                db.search_articles(&query)
+                db.search_articles(&query, feed)
             };
             match search_result {
                 Ok(articles) => {
@@ -969,6 +955,39 @@ fn main() -> ExitCode {
         }
 
         // ---------------------------------------------------------------
+        // _CLASSIFY_STATS — per-tag engagement diagnostics
+        // ---------------------------------------------------------------
+        Commands::ClassifyStats => {
+            match db.tag_engagement_stats() {
+                Ok(stats) => {
+                    let items: Vec<Value> = stats.iter()
+                        .map(|(tag, total, read, starred, deep)| {
+                            let engagement = if *total > 0 {
+                                (*read as f64 + *starred as f64 * 3.0 + *deep as f64 * 2.0) / *total as f64
+                            } else {
+                                0.0
+                            };
+                            json!({
+                                "tag": tag,
+                                "total": total,
+                                "read": read,
+                                "starred": starred,
+                                "deep_read": deep,
+                                "engagement": (engagement * 100.0).round() / 100.0,
+                            })
+                        })
+                        .collect();
+                    success("classify_stats", json!({
+                        "window": "30 days",
+                        "tags": items,
+                        "method": "fact-based annotation (deterministic)",
+                    }), vec![])
+                }
+                Err(e) => error("classify_stats", &format!("{}", e), "Check database"),
+            }
+        }
+
+        // ---------------------------------------------------------------
         // _SUMMARIZE — generate tldr for articles without one
         // ---------------------------------------------------------------
         Commands::Summarize => {
@@ -995,49 +1014,19 @@ fn main() -> ExitCode {
         // ---------------------------------------------------------------
         // _CLASSIFY (replaces _analyze)
         // ---------------------------------------------------------------
-        Commands::Classify { article, download_model, force } => {
-            if download_model {
-                match rss_ner::download_model() {
-                    Ok(()) => return success("classify", json!({"model_downloaded": true}), vec![
-                        action("rss _classify", "Classify untagged articles", json!({})),
-                    ]),
-                    Err(e) => return error("classify", &format!("Download failed: {}", e), "Check network connection"),
-                }
-            }
-
-            match classify_articles(&db, force, article) {
+        Commands::Annotate { article, force } => {
+            match annotate_articles(&db, force, article) {
                 Ok((total, total_tags)) => {
-                    success("classify", json!({
-                        "articles_classified": total,
+                    success("_annotate", json!({
+                        "articles_annotated": total,
                         "tags_assigned": total_tags,
                     }), vec![
-                        action("rss folders articles 新知", "View novel discoveries", json!({})),
-                        action("rss folders articles 动态", "View updates", json!({})),
-                        action("rss folders articles 深度", "View deep reads", json!({})),
-                        action("rss folders articles 行动", "View actionable items", json!({})),
+                        action("rss folders articles long", "View long-form articles", json!({})),
+                        action("rss folders articles tutorial", "View tutorials", json!({})),
+                        action("rss folders articles unread", "View unread", json!({})),
                     ])
                 }
-                Err(e) => error("classify", &e, "Run `rss _classify --download-model` first"),
-            }
-        }
-
-        // ---------------------------------------------------------------
-        // _TAG (manual tag override)
-        // ---------------------------------------------------------------
-        Commands::Tag { id, tags } => {
-            let tag_list: Vec<String> = tags.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let tags_str = tag_list.join(",");
-
-            match db.set_article_tags(id, &tags_str) {
-                Ok(true) => success("tag", json!({
-                    "article_id": id,
-                    "tags": tag_list,
-                }), vec![]),
-                Ok(false) => error("tag", &format!("Article {} not found", id), "Use `rss articles` to find valid IDs"),
-                Err(e) => error("tag", &format!("{}", e), "Check article ID"),
+                Err(e) => error("_annotate", &e, "Check database"),
             }
         }
 
@@ -1096,19 +1085,25 @@ fn main() -> ExitCode {
         Commands::Folders { action: folder_action } => {
             match folder_action {
                 None => {
-                    // List: 4 fixed cognitive folders + manual folders from DB
+                    // List: smart views (fact-based) + manual folders from DB
                     let mut items: Vec<Value> = Vec::new();
 
-                    // Add 4 fixed cognitive folders with article counts
-                    for name in COGNITIVE_FOLDER_NAMES {
-                        let count = db.count_articles_by_tag(name).unwrap_or(0);
-                        items.push(json!({
-                            "id": null,
-                            "name": name,
-                            "type": "cognitive",
-                            "article_count": count,
-                        }));
-                    }
+                    // Add smart views with article counts
+                    // "unread" — count unread articles
+                    let unread_count = db.list_articles(None, true).map(|a| a.len()).unwrap_or(0);
+                    items.push(json!({"id": null, "name": "unread", "type": "smart_view", "description": "Unread articles", "article_count": unread_count}));
+
+                    // "long" — articles tagged as long
+                    let long_count = db.count_articles_by_tag("long").unwrap_or(0);
+                    items.push(json!({"id": null, "name": "long", "type": "smart_view", "description": "Long-form articles", "article_count": long_count}));
+
+                    // "tutorial" — articles with code or steps
+                    let tutorial_count = db.count_articles_with_any_tag(&["has_code", "has_steps"]).unwrap_or(0);
+                    items.push(json!({"id": null, "name": "tutorial", "type": "smart_view", "description": "Articles with code or steps", "article_count": tutorial_count}));
+
+                    // "recent" — today's articles
+                    let recent_count = db.search_articles_since("", "24h", 9999, None).map(|a| a.len()).unwrap_or(0);
+                    items.push(json!({"id": null, "name": "recent", "type": "smart_view", "description": "Today's articles", "article_count": recent_count}));
 
                     // Add manual folders from DB
                     if let Ok(folders) = db.list_folders() {
@@ -1118,10 +1113,10 @@ fn main() -> ExitCode {
                     }
 
                     success("folders", json!({"folders": items, "count": items.len()}), vec![
-                        action("rss folders articles 新知", "View novel discoveries", json!({})),
-                        action("rss folders articles 动态", "View updates", json!({})),
-                        action("rss folders articles 深度", "View deep reads", json!({})),
-                        action("rss folders articles 行动", "View actionable items", json!({})),
+                        action("rss folders articles unread", "View unread articles", json!({})),
+                        action("rss folders articles long", "View long-form articles", json!({})),
+                        action("rss folders articles tutorial", "View tutorials", json!({})),
+                        action("rss folders articles recent", "View today's articles", json!({})),
                         action("rss folders create <name>", "Create manual folder", json!({})),
                     ])
                 }
@@ -1167,60 +1162,38 @@ fn main() -> ExitCode {
                     }
                 }
                 Some(FolderAction::Articles { name, count }) => {
-                    // Check if it's a cognitive folder name
-                    if is_cognitive_folder(&name) {
-                        match db.get_articles_by_tag(&name, count) {
+                    // Smart views: fact-based queries
+                    if is_smart_view(&name) {
+                        let result = match name.as_str() {
+                            "unread" => db.list_articles(None, true),
+                            "long" => db.get_articles_by_tag("long", count),
+                            "tutorial" => db.get_articles_with_any_tag(&["has_code", "has_steps"], count),
+                            "recent" => db.search_articles_since("", "24h", count, None),
+                            _ => unreachable!(),
+                        };
+                        match result {
+                            Ok(arts) => {
+                                let items: Vec<Value> = arts.iter().take(count)
+                                    .map(|a| serde_json::to_value(a).unwrap())
+                                    .collect();
+                                success("folders", json!({"view": name, "articles": items, "count": items.len()}), vec![])
+                            }
+                            Err(e) => error("folders", &format!("{}", e), "Check database"),
+                        }
+                    } else if let Ok(id) = name.parse::<i64>() {
+                        // Manual folder by ID
+                        match db.get_folder_feed_articles(id, count) {
                             Ok(arts) => {
                                 let items: Vec<Value> = arts.iter()
                                     .map(|a| serde_json::to_value(a).unwrap())
                                     .collect();
-                                success("folders", json!({"folder_name": name, "articles": items, "count": items.len()}), vec![])
+                                success("folders", json!({"folder_id": id, "articles": items, "count": items.len()}), vec![])
                             }
-                            Err(e) => error("folders", &format!("{}", e), "Run `rss _classify` first"),
-                        }
-                    } else if let Ok(id) = name.parse::<i64>() {
-                        // Manual folder by ID
-                        match db.list_folders() {
-                            Ok(folders) => {
-                                if let Some((_, _, _ftype, _query)) = folders.iter().find(|(fid, _, _, _)| *fid == id) {
-                                    let articles = db.get_folder_feed_articles(id, count);
-                                    match articles {
-                                        Ok(arts) => {
-                                            let items: Vec<Value> = arts.iter()
-                                                .map(|a| serde_json::to_value(a).unwrap())
-                                                .collect();
-                                            success("folders", json!({"folder_id": id, "articles": items, "count": items.len()}), vec![])
-                                        }
-                                        Err(e) => error("folders", &format!("{}", e), "Check folder"),
-                                    }
-                                } else {
-                                    error("folders", &format!("Folder {} not found", id), "Use `rss folders` to see IDs")
-                                }
-                            }
-                            Err(e) => error("folders", &format!("{}", e), "Check database"),
+                            Err(e) => error("folders", &format!("{}", e), "Use `rss folders` to see IDs"),
                         }
                     } else {
-                        error("folders", &format!("Unknown folder: {}. Use one of: 新知, 动态, 深度, 行动, or a numeric folder ID", name), "Use `rss folders` to list available folders")
+                        error("folders", &format!("Unknown view: {}. Use one of: unread, long, tutorial, recent, or a numeric folder ID", name), "Use `rss folders` to list available views")
                     }
-                }
-                Some(FolderAction::Reset) => {
-                    // Clear all tags and re-classify
-                    let cleared = db.clear_all_tags().unwrap_or(0);
-
-                    let classify_result = if rss_ner::is_embed_model_available() {
-                        classify_articles(&db, true, None).ok()
-                    } else {
-                        None
-                    };
-
-                    success("folders", json!({
-                        "action": "reset",
-                        "tags_cleared": cleared,
-                        "reclassified": classify_result.map(|(c, t)| json!({"articles": c, "tags": t})),
-                    }), vec![
-                        action("rss folders articles 新知", "View novel discoveries", json!({})),
-                        action("rss folders articles 动态", "View updates", json!({})),
-                    ])
                 }
             }
         }

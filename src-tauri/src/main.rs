@@ -44,10 +44,11 @@ pub struct FetchResult {
     pub error: Option<String>,
 }
 
-/// Fixed cognitive smart folder
+/// Fact-based smart view
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SmartFolder {
+pub struct SmartView {
     pub name: String,
+    pub description: Option<String>,
     pub article_count: i64,
 }
 
@@ -252,10 +253,9 @@ fn folder_articles(tag: String, count: Option<usize>) -> Result<Vec<Article>, St
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ClassifyResult {
-    pub articles_processed: i64,
-    pub classified: i64,
-    pub unclassifiable: i64,
+pub struct AnnotateResult {
+    pub articles_annotated: i64,
+    pub tags_assigned: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -265,11 +265,11 @@ pub struct FolderCount {
 }
 
 #[tauri::command]
-fn classify_articles() -> Result<ClassifyResult, String> {
-    let result = cli(&["_classify"])?;
-    let classify: ClassifyResult = serde_json::from_value(result.clone())
-        .map_err(|e| format!("Failed to parse classify result: {}", e))?;
-    Ok(classify)
+fn annotate_articles() -> Result<AnnotateResult, String> {
+    let result = cli(&["_annotate"])?;
+    let annotate: AnnotateResult = serde_json::from_value(result.clone())
+        .map_err(|e| format!("Failed to parse annotate result: {}", e))?;
+    Ok(annotate)
 }
 
 #[tauri::command]
@@ -305,18 +305,6 @@ fn move_feed(feed_id: i64, folder_id: Option<i64>) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn reset_folders() -> Result<serde_json::Value, String> {
-    let result = cli(&["folders", "reset"])?;
-    Ok(result)
-}
-
-#[tauri::command]
-fn tag_article(id: i64, tags: String) -> Result<bool, String> {
-    cli(&["_tag", &id.to_string(), "--tags", &tags])?;
-    Ok(true)
-}
-
-#[tauri::command]
 fn folder_counts() -> Result<Vec<FolderCount>, String> {
     let result = cli(&["folders"])?;
     let folders: Vec<FolderCount> = serde_json::from_value(result["folders"].clone())
@@ -344,12 +332,10 @@ fn main() {
             list_folders,
             folder_articles,
             folder_counts,
-            classify_articles,
+            annotate_articles,
             create_folder,
             delete_folder,
             move_feed,
-            reset_folders,
-            tag_article,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -408,17 +408,6 @@ export default function App() {
     requestAnimationFrame(() => focusArticleItem(0));
   };
 
-  const resetSmartFolders = async () => {
-    setStatus("Resetting tags and re-classifying...");
-    try {
-      await invoke("reset_folders");
-      await loadFolders();
-      setStatus("Tags cleared and articles re-classified.");
-    } catch (e) {
-      setStatus(`Error: ${e}`);
-    }
-  };
-
   const selectFeed = async (feed: Feed, index?: number) => {
     setSelectedFolder(null);
     setSelectedFeed(feed.id);
@@ -840,16 +829,6 @@ export default function App() {
                     )}
                   </For>
 
-                  {/* Reset action */}
-                  <li role="none" class="smart-folder-actions">
-                    <button
-                      class="sf-action-btn"
-                      onClick={resetSmartFolders}
-                      aria-label="Reset: clear tags and re-classify"
-                    >
-                      Reset
-                    </button>
-                  </li>
                 </ul>
               </li>
             </Show>

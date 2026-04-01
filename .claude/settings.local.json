@@ -28,7 +28,8 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(curl -s \"https://crates.io/api/v1/crates/tokenizers\")",
       "Bash(python -m json.tool)",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")"
     ]
   }
 }
