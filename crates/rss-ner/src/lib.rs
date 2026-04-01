@@ -35,6 +35,11 @@ pub fn is_model_available() -> bool {
     dir.join("tokenizer.json").exists() && dir.join("model_int8.onnx").exists()
 }
 
+pub fn is_embed_model_available() -> bool {
+    let dir = model_dir();
+    dir.join("embed_model_int8.onnx").exists() && dir.join("embed_tokenizer.json").exists()
+}
+
 /// Download TinyBERT NER model from HuggingFace (~16MB total)
 pub fn download_model() -> Result<(), Box<dyn std::error::Error>> {
     let dir = model_dir();
@@ -58,6 +63,24 @@ pub fn download_model() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = client.get(&url).send()?.bytes()?;
         std::fs::write(&path, &bytes)?;
     }
+
+    // Embedding model: all-MiniLM-L6-v2 for semantic topic clustering
+    let embed_files = [
+        ("onnx/model_int8.onnx", "embed_model_int8.onnx"),
+        ("tokenizer.json", "embed_tokenizer.json"),
+    ];
+
+    let embed_base = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main";
+    for (remote, local) in &embed_files {
+        let path = dir.join(local);
+        if path.exists() {
+            continue;
+        }
+        let url = format!("{}/{}", embed_base, remote);
+        let bytes = client.get(&url).send()?.bytes()?;
+        std::fs::write(&path, &bytes)?;
+    }
+
     Ok(())
 }
 
@@ -363,4 +386,209 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
     }
 
     deduped.into_values().collect()
+}
+
+// ── Sentence Embedding + K-means Clustering ──
+
+/// Embed text into a 384-dimensional vector using all-MiniLM-L6-v2
+pub fn embed_text(text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    if !is_embed_model_available() {
+        return Err("Embedding model not found. Run `rss analyze --download-model` first.".into());
+    }
+
+    let dir = model_dir();
+    let tokenizer = tokenizers::Tokenizer::from_file(dir.join("embed_tokenizer.json"))
+        .map_err(|e| format!("Tokenizer error: {}", e))?;
+    let mut session = Session::builder()?
+        .commit_from_file(dir.join("embed_model_int8.onnx"))?;
+
+    let encoding = tokenizer
+        .encode(text, true)
+        .map_err(|e| format!("Encoding error: {}", e))?;
+    let max_len = 128.min(encoding.get_ids().len()); // short texts, 128 tokens enough
+
+    let ids: Vec<i64> = encoding.get_ids()[..max_len]
+        .iter()
+        .map(|&x| x as i64)
+        .collect();
+    let mask: Vec<i64> = encoding.get_attention_mask()[..max_len]
+        .iter()
+        .map(|&x| x as i64)
+        .collect();
+    let token_type: Vec<i64> = vec![0i64; max_len];
+    let len = ids.len();
+
+    let input_ids = Tensor::from_array(([1usize, len], ids))?;
+    let attention_mask_val = Tensor::from_array(([1usize, len], mask.clone()))?;
+    let token_type_ids = Tensor::from_array(([1usize, len], token_type))?;
+
+    let outputs = session.run(ort::inputs![
+        "input_ids" => input_ids,
+        "attention_mask" => attention_mask_val,
+        "token_type_ids" => token_type_ids,
+    ])?;
+
+    // Output shape: [1, seq_len, 384] — do mean pooling over seq_len
+    let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    let hidden_dim = 384;
+    let seq_len = max_len;
+
+    // Mean pooling with attention mask
+    let mut pooled = vec![0.0f32; hidden_dim];
+    let mut mask_sum = 0.0f32;
+    for t in 0..seq_len {
+        let m = mask[t] as f32;
+        mask_sum += m;
+        for d in 0..hidden_dim {
+            pooled[d] += data[t * hidden_dim + d] * m;
+        }
+    }
+    if mask_sum > 0.0 {
+        for d in 0..hidden_dim {
+            pooled[d] /= mask_sum;
+        }
+    }
+
+    // L2 normalize
+    let norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for d in 0..hidden_dim {
+            pooled[d] /= norm;
+        }
+    }
+
+    Ok(pooled)
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    // vectors are already L2-normalized, so dot product = cosine similarity
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// Cluster article entity vectors into K topics using K-means
+/// Input: Vec<(article_id, entity_text, embedding)>
+/// Output: Vec<(topic_label, article_ids)> — up to K clusters
+pub fn cluster_into_topics(
+    items: &[(i64, String, Vec<f32>)],
+    k: usize,
+) -> Vec<(String, Vec<i64>)> {
+    if items.is_empty() || k == 0 {
+        return vec![];
+    }
+    let k = k.min(items.len());
+    let dim = 384;
+
+    // Initialize centroids: pick K items spread evenly
+    let mut centroids: Vec<Vec<f32>> = Vec::new();
+    let step = items.len() / k;
+    for i in 0..k {
+        centroids.push(items[(i * step).min(items.len() - 1)].2.clone());
+    }
+
+    // K-means iterations (max 20)
+    let mut assignments = vec![0usize; items.len()];
+    for _ in 0..20 {
+        let mut changed = false;
+
+        // Assign each item to nearest centroid
+        for (i, (_, _, emb)) in items.iter().enumerate() {
+            let best = centroids
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    cosine_similarity(emb, a)
+                        .partial_cmp(&cosine_similarity(emb, b))
+                        .unwrap()
+                })
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            if assignments[i] != best {
+                assignments[i] = best;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+
+        // Update centroids
+        for c in 0..k {
+            let mut new_centroid = vec![0.0f32; dim];
+            let mut count = 0;
+            for (i, (_, _, emb)) in items.iter().enumerate() {
+                if assignments[i] == c {
+                    for d in 0..dim {
+                        new_centroid[d] += emb[d];
+                    }
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                for d in 0..dim {
+                    new_centroid[d] /= count as f32;
+                }
+                centroids[c] = new_centroid;
+            }
+        }
+    }
+
+    // Build clusters: for each cluster, find the item closest to centroid as label
+    let mut clusters: Vec<(String, Vec<i64>)> = Vec::new();
+    for c in 0..k {
+        let member_indices: Vec<usize> = assignments
+            .iter()
+            .enumerate()
+            .filter(|(_, &a)| a == c)
+            .map(|(i, _)| i)
+            .collect();
+
+        if member_indices.is_empty() {
+            continue;
+        }
+
+        // Find the member closest to centroid — its text becomes the topic label
+        let best_member = member_indices
+            .iter()
+            .max_by(|&&a, &&b| {
+                cosine_similarity(&items[a].2, &centroids[c])
+                    .partial_cmp(&cosine_similarity(&items[b].2, &centroids[c]))
+                    .unwrap()
+            })
+            .unwrap();
+
+        let label = items[*best_member].1.clone();
+        let article_ids: Vec<i64> = member_indices.iter().map(|&i| items[i].0).collect();
+
+        clusters.push((label, article_ids));
+    }
+
+    // Sort by cluster size descending
+    clusters.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    clusters
+}
+
+/// Given article entity strings, cluster them into <=4 semantic topics
+/// Returns: Vec<(topic_label, article_ids)>
+pub fn suggest_topics(
+    article_entities: &[(i64, String)],
+) -> Result<Vec<(String, Vec<i64>)>, Box<dyn std::error::Error>> {
+    if !is_embed_model_available() {
+        return Err("Embedding model not found. Run `rss analyze --download-model` first.".into());
+    }
+
+    // Embed all article entity strings
+    let mut items: Vec<(i64, String, Vec<f32>)> = Vec::new();
+    for (article_id, entity_text) in article_entities {
+        if let Ok(emb) = embed_text(entity_text) {
+            items.push((*article_id, entity_text.clone(), emb));
+        }
+    }
+
+    if items.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Cluster into 4 topics
+    Ok(cluster_into_topics(&items, 4))
 }
