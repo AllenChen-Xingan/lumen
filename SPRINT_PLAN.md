@@ -40,11 +40,11 @@ fully accessible with NVDA screen reader. Architecture: Rust CLI core + Tauri + 
 - [x] Focus management across panes
 - [ ] E2E test: keyboard-only full workflow + ARIA audit
 
-### Sprint 5: Polish [CURRENT]
-- [ ] OPML import/export
-- [ ] Full-text search
+### Sprint 5: Polish [DONE]
+- [x] OPML import/export
+- [x] Full-text search
 - [ ] Auto-refresh interval
-- [ ] High contrast theme
+- [x] High contrast theme
 - [ ] Final NVDA manual test checklist
 
 ## Verification Gates
