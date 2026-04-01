@@ -55,6 +55,12 @@ export default function App() {
     "smart-folders": true,
     "feeds": true,
   });
+  const [contextMenu, setContextMenu] = createSignal<{
+    x: number; y: number;
+    type: "feed" | "folder";
+    id: number;
+  } | null>(null);
+  const [contextMenuIndex, setContextMenuIndex] = createSignal(0);
 
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLDivElement | undefined;
@@ -187,6 +193,109 @@ export default function App() {
       setStatus("Feed removed.");
     } catch (e) {
       setStatus(`Error: ${e}`);
+    }
+  };
+
+  // Context menu helpers
+  const openContextMenu = (x: number, y: number, type: "feed" | "folder", id: number) => {
+    setContextMenu({ x, y, type, id });
+    setContextMenuIndex(0);
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('[role="menu"] [role="menuitem"]')?.focus();
+    });
+  };
+
+  const closeContextMenu = () => {
+    setContextMenu(null);
+    setContextMenuIndex(0);
+  };
+
+  const getContextMenuItems = (): Array<{ label: string; action: () => void }> => {
+    const menu = contextMenu();
+    if (!menu) return [];
+    if (menu.type === "feed") {
+      return [
+        {
+          label: "Move to folder...",
+          action: () => {
+            // TODO: implement move_feed invoke when Tauri command exists
+            // For now, show available folders in status
+            const folderNames = manualFolders().map(f => f.name).join(", ") || "No folders";
+            setStatus(`Move feed: available folders: ${folderNames}. (Not yet implemented)`);
+            closeContextMenu();
+          },
+        },
+        {
+          label: "Delete feed",
+          action: () => {
+            removeFeed(menu.id);
+            closeContextMenu();
+          },
+        },
+      ];
+    }
+    if (menu.type === "folder") {
+      return [
+        {
+          label: "Rename folder",
+          action: () => {
+            // TODO: implement rename_folder invoke when Tauri command exists
+            setStatus("Rename folder: not yet implemented");
+            closeContextMenu();
+          },
+        },
+        {
+          label: "Delete folder",
+          action: () => {
+            // TODO: implement delete_folder invoke when Tauri command exists
+            setStatus("Delete folder: not yet implemented");
+            closeContextMenu();
+          },
+        },
+      ];
+    }
+    return [];
+  };
+
+  const navigateContextMenu = (delta: number) => {
+    const items = getContextMenuItems();
+    if (items.length === 0) return;
+    const newIndex = Math.max(0, Math.min(items.length - 1, contextMenuIndex() + delta));
+    setContextMenuIndex(newIndex);
+    requestAnimationFrame(() => {
+      const menuItems = document.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]');
+      menuItems[newIndex]?.focus();
+    });
+  };
+
+  const handleContextMenuKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeContextMenu();
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      navigateContextMenu(1);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      navigateContextMenu(-1);
+      return;
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      const items = getContextMenuItems();
+      const idx = contextMenuIndex();
+      if (items[idx]) items[idx].action();
+      return;
+    }
+    if (e.key === "Tab") {
+      // Trap focus inside menu
+      e.preventDefault();
+      return;
     }
   };
 
@@ -516,6 +625,14 @@ export default function App() {
     loadFolders();
     document.addEventListener("keydown", handleKeyDown);
 
+    // Close context menu on click outside
+    const handleClickOutside = (e: MouseEvent) => {
+      if (contextMenu() && !(e.target as HTMLElement)?.closest('[role="menu"]')) {
+        closeContextMenu();
+      }
+    };
+    document.addEventListener("click", handleClickOutside);
+
     const autoRefreshInterval = setInterval(() => {
       fetchAll();
     }, 15 * 60 * 1000);
@@ -526,6 +643,7 @@ export default function App() {
 
     onCleanup(() => {
       document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("click", handleClickOutside);
       clearInterval(autoRefreshInterval);
       clearInterval(labelUpdateInterval);
     });
@@ -709,6 +827,10 @@ export default function App() {
                           aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
                           data-feed-id={feed.id}
                           onClick={() => selectFeed(feed)}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            openContextMenu(e.clientX, e.clientY, "feed", feed.id);
+                          }}
                           onKeyDown={(e) => {
                             if (e.key === "Delete") {
                               removeFeed(feed.id);
@@ -732,6 +854,40 @@ export default function App() {
             </Show>
           </ul>
         </nav>
+
+        {/* Context menu */}
+        <Show when={contextMenu()}>
+          {(menu) => (
+            <ul
+              role="menu"
+              class="context-menu"
+              aria-label="Context menu"
+              style={{
+                position: "fixed",
+                left: `${menu().x}px`,
+                top: `${menu().y}px`,
+              }}
+              onKeyDown={handleContextMenuKeyDown}
+            >
+              <For each={getContextMenuItems()}>
+                {(item, index) => (
+                  <li
+                    role="menuitem"
+                    class="context-menu-item"
+                    tabindex={contextMenuIndex() === index() ? 0 : -1}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      item.action();
+                    }}
+                    onFocus={() => setContextMenuIndex(index())}
+                  >
+                    {item.label}
+                  </li>
+                )}
+              </For>
+            </ul>
+          )}
+        </Show>
 
         {/* Articles pane */}
         <section

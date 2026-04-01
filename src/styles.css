@@ -423,6 +423,35 @@ input:focus-visible,
   color: var(--fg);
 }
 
+/* Context menu */
+.context-menu {
+  list-style: none;
+  background: var(--pane-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  padding: 4px 0;
+  min-width: 160px;
+  z-index: 1000;
+}
+
+.context-menu-item {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--fg);
+}
+
+.context-menu-item:hover {
+  background: var(--hover);
+}
+
+.context-menu-item:focus-visible {
+  background: var(--accent);
+  color: #fff;
+  outline: none;
+}
+
 /* Windows High Contrast mode support */
 @media (forced-colors: active) {
   button {
