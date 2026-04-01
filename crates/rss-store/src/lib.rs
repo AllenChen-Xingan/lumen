@@ -369,11 +369,28 @@ impl Database {
     // ── Folder methods ──
 
     pub fn create_folder(&self, name: &str, folder_type: &str, query: Option<&str>) -> Result<i64, rusqlite::Error> {
+        // Enforce max 4 manual folders constraint
+        if folder_type == "manual" {
+            let count = self.count_manual_folders()?;
+            if count >= 4 {
+                return Err(rusqlite::Error::ModuleError(
+                    "Maximum of 4 manual folders allowed".to_string(),
+                ));
+            }
+        }
         self.conn.execute(
             "INSERT INTO folders (name, folder_type, query) VALUES (?1, ?2, ?3)",
             rusqlite::params![name, folder_type, query],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Count manual folders
+    pub fn count_manual_folders(&self) -> Result<i64, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM folders WHERE folder_type = 'manual'"
+        )?;
+        stmt.query_row([], |row| row.get(0))
     }
 
     pub fn list_folders(&self) -> Result<Vec<(i64, String, String, Option<String>)>, rusqlite::Error> {
