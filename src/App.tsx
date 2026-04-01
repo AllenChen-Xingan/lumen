@@ -37,6 +37,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = createSignal("");
   const [lastRefreshTime, setLastRefreshTime] = createSignal<number | null>(null);
   const [lastRefreshLabel, setLastRefreshLabel] = createSignal("");
+  const [showAddFeed, setShowAddFeed] = createSignal(false);
 
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLUListElement | undefined;
@@ -103,10 +104,20 @@ export default function App() {
       const result = await invoke<{ feed: Feed; article_count: number }>("add_feed", { url });
       setStatus(`Added: ${result.feed.title} (${result.article_count} articles)`);
       setFeedUrl("");
+      setShowAddFeed(false);
       await loadFeeds();
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
+  };
+
+  const loadAllArticles = async () => {
+    setSelectedFeed(null);
+    setSelectedArticle(null);
+    setSelectedArticleIndex(0);
+    setActivePane("articles");
+    await loadArticles();
+    requestAnimationFrame(() => focusArticleItem(0));
   };
 
   const removeFeed = async (id: number) => {
@@ -388,11 +399,17 @@ export default function App() {
           <div class="pane-header">
             <h2>Feeds</h2>
             <div class="pane-actions">
-              <button onClick={importOpml} aria-label="Import feeds from OPML file">
-                Import
-              </button>
-              <button onClick={exportOpml} aria-label="Export feeds as OPML file">
-                Export
+              <button
+                onClick={() => {
+                  setShowAddFeed(!showAddFeed());
+                  if (!showAddFeed()) {
+                    requestAnimationFrame(() => document.getElementById("feed-url")?.focus());
+                  }
+                }}
+                aria-label="Add feed"
+                aria-expanded={showAddFeed()}
+              >
+                + Add
               </button>
               <button onClick={fetchAll} aria-label="Refresh all feeds">
                 Refresh
@@ -400,23 +417,33 @@ export default function App() {
             </div>
           </div>
 
-          <form
-            class="add-feed-form"
-            onSubmit={(e) => { e.preventDefault(); addFeed(); }}
-            role="search"
-            aria-label="Add new feed"
-          >
-            <label for="feed-url" class="sr-only">Feed URL</label>
-            <input
-              id="feed-url"
-              type="url"
-              placeholder="Feed URL"
-              value={feedUrl()}
-              onInput={(e) => setFeedUrl(e.currentTarget.value)}
-              aria-label="Feed URL"
-            />
-            <button type="submit">Add</button>
-          </form>
+          <Show when={showAddFeed()}>
+            <form
+              class="add-feed-form"
+              onSubmit={(e) => { e.preventDefault(); addFeed(); }}
+              aria-label="Add new feed"
+            >
+              <label for="feed-url" class="sr-only">Feed URL</label>
+              <input
+                id="feed-url"
+                type="url"
+                placeholder="Paste feed URL, then Enter"
+                value={feedUrl()}
+                onInput={(e) => setFeedUrl(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setShowAddFeed(false);
+                    setFeedUrl("");
+                  }
+                }}
+                aria-label="Feed URL"
+              />
+              <button type="submit" aria-label="Confirm add feed">OK</button>
+              <button type="button" onClick={() => { setShowAddFeed(false); setFeedUrl(""); }} aria-label="Cancel">
+                Cancel
+              </button>
+            </form>
+          </Show>
 
           <ul
             ref={feedListRef}
@@ -425,6 +452,19 @@ export default function App() {
             tabindex="0"
             aria-activedescendant={selectedFeed() ? `feed-${selectedFeed()}` : undefined}
           >
+            <li
+              role="option"
+              aria-selected={selectedFeed() === null}
+              aria-label="All articles"
+              tabindex={selectedFeed() === null ? 0 : -1}
+              class="all-articles-item"
+              onClick={() => loadAllArticles()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") { e.preventDefault(); loadAllArticles(); }
+              }}
+            >
+              <span class="feed-title">All Articles</span>
+            </li>
             <For each={feeds()}>
               {(feed, index) => {
                 const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
@@ -463,6 +503,10 @@ export default function App() {
               }}
             </For>
           </ul>
+          <div class="feeds-footer">
+            <button onClick={importOpml} aria-label="Import feeds from OPML file">Import</button>
+            <button onClick={exportOpml} aria-label="Export feeds as OPML file">Export</button>
+          </div>
         </nav>
 
         {/* Articles pane */}
