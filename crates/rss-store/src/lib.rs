@@ -75,6 +75,11 @@ impl Database {
             );
         ")?;
 
+        // Migration: add folder_id to feeds for direct feed-to-folder assignment
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE feeds ADD COLUMN folder_id INTEGER REFERENCES folders(id);"
+        );
+
         // Track which articles have been analyzed
         let _ = self.conn.execute_batch(
             "ALTER TABLE articles ADD COLUMN analyzed INTEGER NOT NULL DEFAULT 0;"
@@ -608,5 +613,60 @@ impl Database {
             })
         })?.collect::<Result<Vec<_>, _>>()?;
         Ok(articles)
+    }
+
+    /// Move a feed into a folder (or remove from folder if folder_id is None)
+    pub fn move_feed_to_folder(&self, feed_id: i64, folder_id: Option<i64>) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE feeds SET folder_id = ?1 WHERE id = ?2",
+            rusqlite::params![folder_id, feed_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// List feeds in a specific folder
+    pub fn list_feeds_in_folder(&self, folder_id: i64) -> Result<Vec<Feed>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, url, site_url, description, added_at FROM feeds WHERE folder_id = ?1"
+        )?;
+        let feeds = stmt.query_map(rusqlite::params![folder_id], |row| {
+            Ok(Feed {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                url: row.get(2)?,
+                site_url: row.get(3)?,
+                description: row.get(4)?,
+                added_at: {
+                    let s: String = row.get(5)?;
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now())
+                },
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(feeds)
+    }
+
+    /// List feeds not in any folder
+    pub fn list_uncategorized_feeds(&self) -> Result<Vec<Feed>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, url, site_url, description, added_at FROM feeds WHERE folder_id IS NULL"
+        )?;
+        let feeds = stmt.query_map([], |row| {
+            Ok(Feed {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                url: row.get(2)?,
+                site_url: row.get(3)?,
+                description: row.get(4)?,
+                added_at: {
+                    let s: String = row.get(5)?;
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now())
+                },
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(feeds)
     }
 }
