@@ -117,6 +117,11 @@ impl Database {
                 entity_name TEXT NOT NULL,
                 rejected_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS reset_reasons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reason TEXT NOT NULL,
+                reset_at TEXT NOT NULL
+            );
         ")?;
 
         Ok(())
@@ -595,6 +600,42 @@ impl Database {
             created.push((id, name.clone()));
         }
         Ok(created)
+    }
+
+    /// Reset all smart folders: delete them, record reason, add old names to rejected list
+    pub fn reset_smart_folders(&self, reason: &str) -> Result<usize, rusqlite::Error> {
+        // Get current smart folder names to reject them
+        let smart_names: Vec<String> = self.conn.prepare(
+            "SELECT name FROM folders WHERE folder_type = 'smart'"
+        )?.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?;
+
+        // Delete all smart folders
+        let deleted = self.conn.execute(
+            "DELETE FROM folders WHERE folder_type = 'smart'", []
+        )?;
+
+        // Record reason
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO reset_reasons (reason, reset_at) VALUES (?1, ?2)",
+            rusqlite::params![reason, now],
+        )?;
+
+        // Add old folder names to rejected list so they don't resurface
+        self.reject_entities(&smart_names)?;
+
+        Ok(deleted)
+    }
+
+    /// Get all reset reasons (for LLM context)
+    pub fn get_reset_reasons(&self) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT reason, reset_at FROM reset_reasons ORDER BY reset_at DESC"
+        )?;
+        let results = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
     }
 
     /// Record rejected entity names so future suggestions skip them
