@@ -83,6 +83,9 @@ export default function App() {
   let feedListRef: HTMLUListElement | undefined;
   let articleListRef: HTMLDivElement | undefined;
   let readerRef: HTMLElement | undefined;
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let contextMenuTrigger: HTMLElement | null = null;
+  const fetchedArticleIds = new Set<number>();
 
   const unreadCount = () => articles().filter((a) => !a.is_read).length;
 
@@ -212,6 +215,7 @@ export default function App() {
     setSelectedFeed(null);
     setSelectedArticle(null);
     setSelectedArticleIndex(0);
+    setSearchQuery("");
     setActivePane("articles");
     await loadArticles();
     requestAnimationFrame(() => focusArticleItem(0));
@@ -280,6 +284,7 @@ export default function App() {
 
   // Context menu helpers
   const openContextMenu = (x: number, y: number, type: "feed" | "folder", id: number) => {
+    contextMenuTrigger = document.activeElement as HTMLElement;
     setContextMenu({ x, y, type, id });
     setContextMenuIndex(0);
     requestAnimationFrame(() => {
@@ -290,6 +295,8 @@ export default function App() {
   const closeContextMenu = () => {
     setContextMenu(null);
     setContextMenuIndex(0);
+    requestAnimationFrame(() => contextMenuTrigger?.focus());
+    contextMenuTrigger = null;
   };
 
   const getContextMenuItems = (): Array<{ label: string; action: () => void }> => {
@@ -401,7 +408,7 @@ export default function App() {
       if (items[idx]) items[idx].action();
       return;
     }
-    if (e.key === "Tab") {
+    if (e.code === "Tab") {
       e.preventDefault();
       return;
     }
@@ -536,11 +543,9 @@ export default function App() {
         prev.map((a) => (a.id === article.id ? { ...a, is_read: true } : a))
       );
     }
-    if (article.url) {
+    if (article.url && !article.full_content && !fetchedArticleIds.has(article.id)) {
+      fetchedArticleIds.add(article.id);
       fetchFullText(article.id);
-    }
-    if (index !== undefined) {
-      prefetchNearby(index);
     }
     requestAnimationFrame(() => readerRef?.focus());
   };
@@ -550,9 +555,9 @@ export default function App() {
     setArticles((prev) =>
       prev.map((a) => (a.id === id ? { ...a, is_starred: !a.is_starred } : a))
     );
-    const sel = selectedArticle();
-    if (sel && sel.id === id) {
-      setSelectedArticle({ ...sel, is_starred: !sel.is_starred });
+    const updated = articles().find(a => a.id === id);
+    if (updated) {
+      setSelectedArticle({ ...updated });
     }
   };
 
@@ -562,6 +567,7 @@ export default function App() {
     try {
       const html = await invoke<string>("fetch_full_text", { id: articleId });
       setFullText(html);
+      setArticles(prev => prev.map(a => a.id === articleId ? { ...a, full_content: html } : a));
     } catch (e) {
       setFullTextError(`${e}`);
     } finally {
@@ -569,15 +575,9 @@ export default function App() {
     }
   };
 
-  const prefetchNearby = (currentIndex: number) => {
-    const list = articles();
-    for (const offset of [-1, 1, 2]) {
-      const i = currentIndex + offset;
-      if (i >= 0 && i < list.length && list[i].url) {
-        invoke("fetch_full_text", { id: list[i].id }).catch(() => {});
-      }
-    }
-  };
+  // Removed prefetchNearby: pre-fetching adjacent articles pollutes
+  // the full_content behavioral signal (full_content IS NOT NULL = user
+  // explicitly chose to read) and wastes HTTP requests.
 
   const navigateArticle = (delta: number) => {
     const list = articles();
@@ -742,8 +742,8 @@ export default function App() {
     if (pane === "articles") {
       if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); navigateArticle(1); }
       else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); navigateArticle(-1); }
-      else if (e.key === "PageDown") { e.preventDefault(); navigateArticle(1); }
-      else if (e.key === "PageUp") { e.preventDefault(); navigateArticle(-1); }
+      else if (e.key === "PageDown") { e.preventDefault(); navigateArticle(10); }
+      else if (e.key === "PageUp") { e.preventDefault(); navigateArticle(-10); }
       else if (e.key === "Home" && e.ctrlKey) {
         e.preventDefault();
         const searchInput = document.querySelector<HTMLElement>('.search-input, #search-input');
@@ -890,7 +890,6 @@ export default function App() {
                       setFeedUrl("");
                     }
                   }}
-                  aria-label="Feed URL"
                 />
                 <button type="submit" aria-label="Confirm add feed">OK</button>
                 <button type="button" onClick={() => { setShowAddFeed(false); setFeedUrl(""); }} aria-label="Cancel">
@@ -929,7 +928,6 @@ export default function App() {
                       setPendingMoveFeedId(null);
                     }
                   }}
-                  aria-label="Folder name"
                 />
                 <button type="submit" aria-label="Create folder">OK</button>
                 <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderName(""); setPendingMoveFeedId(null); }} aria-label="Cancel">
@@ -948,7 +946,11 @@ export default function App() {
                 value={bulkTargetFolder() ?? ""}
                 onChange={(e) => {
                   const val = e.currentTarget.value;
-                  setBulkTargetFolder(val ? parseInt(val) : null);
+                  if (val === "__uncategorize") {
+                    setBulkTargetFolder(-1);
+                  } else {
+                    setBulkTargetFolder(val ? parseInt(val) : null);
+                  }
                 }}
               >
                 <option value="">Move to...</option>
@@ -961,8 +963,7 @@ export default function App() {
                 disabled={selectedFeedIds().size === 0}
                 onClick={() => {
                   const target = bulkTargetFolder();
-                  const selectVal = (document.querySelector('.manage-bar select') as HTMLSelectElement)?.value;
-                  if (selectVal === "__uncategorize") {
+                  if (target === -1) {
                     bulkMoveFeeds(null);
                   } else if (target) {
                     bulkMoveFeeds(target);
@@ -1201,7 +1202,6 @@ export default function App() {
         {/* Articles pane */}
         <section
           class="pane articles-pane"
-          role="complementary"
           aria-label="Article list"
         >
           <div class="pane-header">
@@ -1217,9 +1217,9 @@ export default function App() {
               onInput={(e) => {
                 const q = e.currentTarget.value;
                 setSearchQuery(q);
-                searchArticles(q);
+                clearTimeout(searchTimer);
+                searchTimer = setTimeout(() => searchArticles(q), 300);
               }}
-              aria-label="Search articles"
             />
           </div>
           <div
@@ -1228,6 +1228,16 @@ export default function App() {
             aria-label="Articles"
             aria-busy={feedBusy()}
           >
+            <Show when={feedBusy() && articles().length === 0}>
+              <div class="empty-state" aria-label="Loading articles">
+                <p>Loading articles...</p>
+              </div>
+            </Show>
+            <Show when={!feedBusy() && articles().length === 0}>
+              <div class="empty-state">
+                <p>No articles to display</p>
+              </div>
+            </Show>
             <For each={articles()}>
               {(article, index) => {
                 const titleId = `article-title-${article.id}`;
@@ -1235,6 +1245,7 @@ export default function App() {
                 return (
                   <article
                     id={`article-${article.id}`}
+                    role="article"
                     aria-posinset={index() + 1}
                     aria-setsize={articles().length}
                     aria-labelledby={titleId}
@@ -1250,22 +1261,6 @@ export default function App() {
                       if (e.key === "s") {
                         toggleStar(article.id);
                       }
-                      if (e.key === "ArrowDown" || e.key === "j") {
-                        e.preventDefault();
-                        navigateArticle(1);
-                      }
-                      if (e.key === "ArrowUp" || e.key === "k") {
-                        e.preventDefault();
-                        navigateArticle(-1);
-                      }
-                      if (e.key === "PageDown") {
-                        e.preventDefault();
-                        navigateArticle(1);
-                      }
-                      if (e.key === "PageUp") {
-                        e.preventDefault();
-                        navigateArticle(-1);
-                      }
                     }}
                     onFocus={() => setSelectedArticleIndex(index())}
                   >
@@ -1276,9 +1271,11 @@ export default function App() {
                       {article.is_starred ? "\u2605" : ""}
                     </span>
                     <span id={titleId} class="article-title">{article.title}</span>
-                    <span id={snippetId} class="sr-only">
-                      {article.tldr || (article.summary ? article.summary.substring(0, 100) : "")}
-                    </span>
+                    <Show when={article.summary}>
+                      <span id={snippetId} class="article-summary">
+                        {article.summary!.length > 120 ? article.summary!.substring(0, 117) + "..." : article.summary}
+                      </span>
+                    </Show>
                   </article>
                 );
               }}
@@ -1307,7 +1304,7 @@ export default function App() {
           <Show
             when={selectedArticle()}
             fallback={
-              <div class="empty-state" role="status">
+              <div class="empty-state">
                 <p>Select an article to read</p>
               </div>
             }
