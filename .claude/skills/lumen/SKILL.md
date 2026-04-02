@@ -1,126 +1,120 @@
 ---
 name: lumen
-description: Search and retrieve articles from RSS feeds via Lumen CLI. Use when the user asks to find articles, research a topic from feeds, get a daily briefing, or read specific articles. Trigger words - "search feeds", "what's new in my feeds", "find articles about", "read from feeds", "daily briefing", "lumen".
+description: "Find relevant articles from RSS feeds based on current context. Use when: user says /lumen, asks about feeds, wants inspiration, or says 'find articles about'. Scans conversation context to understand intent, searches feeds, retrieves markdown for deep reading."
 metadata:
   author: allenchen
-  version: '0.1'
+  version: '0.2'
   title: Lumen Feed Intelligence
-  description_zh: 通过 Lumen CLI 搜索和检索 RSS 订阅文章，支持话题研究、每日简报、全文 Markdown 提取
+  description_zh: 基于当前上下文自动从 RSS 订阅中发现相关文章
 ---
 
-# Lumen Feed Intelligence
+# Lumen — Context-Aware Feed Intelligence
 
-Lumen is a local CLI that manages RSS feeds and exposes articles as structured JSON for agent consumption. All output is JSON envelopes. The GUI is for the human; this skill is for agents.
+## What This Does
 
-## When to Use
+When invoked, you act as an information retrieval agent:
 
-- User asks to search their feeds for a topic
-- User wants a briefing on recent/unread articles
-- User asks to read or analyze specific articles
-- User mentions "lumen", "feeds", "subscriptions"
+1. **Read the room** — scan the conversation, current files, CLAUDE.md, and user's message to understand what they're working on or curious about
+2. **Extract search intent** — turn that understanding into concrete search queries
+3. **Search feeds** — call `lumen` CLI to find matching articles
+4. **Triage** — filter compact results by relevance, quality (wc, tags), and recency
+5. **Retrieve** — fetch top picks as markdown files
+6. **Report** — summarize what you found, with file paths for deep reading
 
-## Setup
+## Step 1: Understand Intent
 
-The `lumen` binary must be in PATH or at the project's `target/debug/lumen` path. Test with:
+Before touching lumen, figure out what the user actually wants. Sources of intent:
+
+- **Explicit**: user said "find articles about X" → search X
+- **Conversational**: user has been discussing topic Y for the last few messages → search Y
+- **Project**: CLAUDE.md or recent files reveal the project domain → search domain keywords
+- **Exploratory**: user said "what's interesting" or "inspire me" → scan unread, surface high-wc diverse articles
+
+Combine these into 2-5 search queries. Use OR for related terms:
+- Working on Rust CLI → `"rust OR CLI OR terminal"`
+- Discussing agent architecture → `"agent OR LLM OR tool-use OR orchestration"`
+- Just wants inspiration → skip search, use `lumen articles --compact --unread --count 100`
+
+If the user provided arguments after `/lumen`, treat those as the primary intent. Example: `/lumen rust async patterns` → search "rust OR async" directly.
+
+## Step 2: Search and Filter
+
+Use a background Agent to run the search so it doesn't pollute main context:
 
 ```bash
-lumen
+# Topic search
+lumen search "query1 OR query2" --compact --since 7d --count 30
+
+# Or broader recent scan  
+lumen articles --compact --unread --count 100
 ```
 
-This returns a self-describing JSON with all commands and the `compact_schema` explaining short field names.
+Filter with jq before fetching full text:
+```bash
+# Keep only substantial unread articles
+| jq '[.result.articles[] | select(.r==0 and .wc > 300)] | sort_by(-.wc) | .[0:10]'
+```
 
-## Compact Schema
+Pick top 3-5 articles based on:
+- Title/tldr relevance to the intent
+- `wc > 300` (substantial content)
+- `tags` containing useful signals (has_code for technical work, structured for tutorials)
+- Diverse `src` (don't return 5 articles from one feed)
 
-Compact output uses short keys to save tokens:
+## Step 3: Retrieve as Markdown
+
+```bash
+lumen fetch-full-text <id1>,<id2>,<id3> --markdown
+```
+
+Returns file paths. Use `Read` or `Grep` on the markdown files to verify relevance before presenting to user.
+
+## Step 4: Report to User
+
+Present results as a concise list:
+
+```
+Found 4 articles related to [intent summary]:
+
+1. **Title** (source, 2300 words)
+   tldr summary
+   → /tmp/lumen/401_title-slug.md
+
+2. **Title** (source, 1500 words, has_code)
+   tldr summary  
+   → /tmp/lumen/402_title-slug.md
+```
+
+If a file is particularly relevant, read a key section and quote it.
+
+## Compact Schema Quick Reference
 
 | Key | Meaning |
 |-----|---------|
-| `id` | Article ID (use for all operations) |
+| `id` | Article ID |
 | `t` | Title |
 | `src` | Feed name |
-| `tldr` | First sentence summary |
-| `tags` | Fact-based tags: long, short, has_code, has_steps, has_images, has_links, structured, link_rich, has_references |
+| `tldr` | First sentence |
+| `tags` | long, short, has_code, has_steps, has_images, structured, link_rich |
 | `wc` | Word count |
-| `r` | Read status (0/1) |
-| `s` | Starred status (0/1) |
+| `r` | Read (0/1) |
+| `s` | Starred (0/1) |
 
-## Core Workflow
+## Search Flags
 
-### 1. Scan — find articles (cheapest, ~50 tokens/article)
-
-```bash
-# Search by topic
-lumen search "rust async" --compact --count 20
-
-# Multi-topic with FTS5 boolean operators
-lumen search "rust OR wasm OR async" --compact --since 7d
-
-# Date range
-lumen search "AI" --compact --after 2026-03-15 --before 2026-03-20
-
-# Single day
-lumen search "claude" --compact --on 2026-03-28
-
-# All recent unread
-lumen articles --compact --unread --count 50
-```
-
-### 2. Filter — use jq on compact output (zero cost, runs locally)
-
-```bash
-# Long unread articles with code
-lumen articles --compact --count 200 | jq '[.result.articles[] | select(.r==0 and .wc > 1000 and (.tags | contains("has_code")))]'
-
-# Extract IDs for batch operations
-lumen search "topic" --compact | jq -r '[.result.articles[] | select(.wc > 500) | .id] | join(",")'
-```
-
-### 3. Retrieve — get full text as markdown files
-
-```bash
-# Single article
-lumen fetch-full-text 401 --markdown
-# Returns: {"id": 401, "path": "/tmp/lumen/401_title-slug.md", "wc": 3200}
-
-# Batch
-lumen fetch-full-text 401,402,403 --markdown
-
-# Pipe from search
-lumen search "rust" --compact | jq -r '[.result.articles[].id] | join(",")' | lumen fetch-full-text --markdown
-```
-
-After getting the file path, use `Read`, `Grep`, or `Bash` to analyze the markdown content directly. The full text never enters your context unless you choose to read it.
-
-### 4. Act — mark articles
-
-```bash
-lumen star 401          # Star interesting article
-lumen mark-read 401     # Mark as read
-```
-
-## One-shot Examples
-
-**"What's new about AI in my feeds this week?"**
-```bash
-lumen search "AI OR LLM OR agent" --compact --since 7d --count 30
-```
-Then summarize the compact results for the user.
-
-**"Find and read the best rust articles from March"**
-```bash
-lumen search "rust" --compact --after 2026-03-01 --before 2026-03-31 | jq '[.result.articles[] | select(.wc > 500)] | sort_by(-.wc)'
-```
-Pick top results, then `lumen fetch-full-text <ids> --markdown` and read the files.
-
-**"Give me a daily briefing"**
-```bash
-lumen articles --compact --unread --count 100
-```
-Group by `src`, highlight high-wc and has_code articles, summarize for user.
+| Flag | Use |
+|------|-----|
+| `--compact` | Always use for scan phase |
+| `--since 7d` | Relative time: 24h, 7d, 30d |
+| `--after 2026-03-15` | Absolute start date |
+| `--before 2026-03-20` | Absolute end date |
+| `--on 2026-03-15` | Single day |
+| `--feed 5` | Limit to one feed |
+| `--count 50` | Max results |
 
 ## Common Mistakes
 
-- **Don't read full HTML output** — always use `--markdown` flag, it writes clean markdown to a temp file
-- **Don't fetch all articles then filter** — use `--compact` first, filter with jq, then fetch only what you need
-- **Don't guess field names** — run `lumen` with no args to get `compact_schema`
-- **Don't use `--since` for absolute dates** — use `--after`/`--before`/`--on` instead
+- **Don't skip intent analysis** — blindly searching the user's literal words misses what they actually need
+- **Don't fetch full text before filtering** — compact scan first, always
+- **Don't dump 20 articles** — pick 3-5 best, user can ask for more
+- **Don't read markdown into main context** — use Grep to check relevance, only Read specific sections worth quoting
