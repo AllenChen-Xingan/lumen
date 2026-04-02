@@ -1,6 +1,17 @@
 use rusqlite::Connection;
 use rss_core::{Feed, Article};
 
+#[derive(Debug, Clone)]
+pub struct FeedHealth {
+    pub id: i64,
+    pub title: String,
+    pub url: String,
+    pub last_fetch_at: Option<String>,
+    pub last_error: Option<String>,
+    pub fail_count: i64,
+    pub avg_response_ms: Option<i64>,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -15,6 +26,14 @@ impl Database {
 
     fn init(&self) -> Result<(), rusqlite::Error> {
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        self.conn.execute_batch("
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA cache_size = -64000;
+            PRAGMA mmap_size = 268435456;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA busy_timeout = 5000;
+        ")?;
         self.conn.execute_batch("
             CREATE TABLE IF NOT EXISTS feeds (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +123,10 @@ impl Database {
         let _ = self.conn.execute_batch(
             "ALTER TABLE feeds ADD COLUMN folder_id INTEGER REFERENCES folders(id);"
         );
+        // Cleanup: clear dangling folder_id references
+        let _ = self.conn.execute_batch(
+            "UPDATE feeds SET folder_id = NULL WHERE folder_id IS NOT NULL AND folder_id NOT IN (SELECT id FROM folders);"
+        );
 
         // Track which articles have been analyzed
         let _ = self.conn.execute_batch(
@@ -120,6 +143,46 @@ impl Database {
             "ALTER TABLE articles ADD COLUMN tldr TEXT;"
         );
 
+        // Migration: add word_count for precise length-based filtering
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0;"
+        );
+
+        // Migration: add numeric feature columns for smart view queries
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN heading_count INTEGER NOT NULL DEFAULT 0;"
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN code_block_count INTEGER NOT NULL DEFAULT 0;"
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN external_link_count INTEGER NOT NULL DEFAULT 0;"
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles ADD COLUMN blockquote_count INTEGER NOT NULL DEFAULT 0;"
+        );
+
+        // Indexes for smart view queries
+        let _ = self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_articles_word_count ON articles(word_count);"
+        );
+        let _ = self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_articles_code_block_count ON articles(code_block_count);"
+        );
+
+        // Migration: feed health monitoring columns
+        let _ = self.conn.execute_batch("ALTER TABLE feeds ADD COLUMN last_fetch_at TEXT;");
+        let _ = self.conn.execute_batch("ALTER TABLE feeds ADD COLUMN last_error TEXT;");
+        let _ = self.conn.execute_batch("ALTER TABLE feeds ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0;");
+        let _ = self.conn.execute_batch("ALTER TABLE feeds ADD COLUMN avg_response_ms INTEGER;");
+
+        // Migration: add ETag/Last-Modified cache headers to feeds for conditional fetch
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE feeds ADD COLUMN etag TEXT;"
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE feeds ADD COLUMN last_modified_header TEXT;"
+        );
 
         // Rejected suggestions (feedback loop)
         self.conn.execute_batch("
@@ -135,6 +198,46 @@ impl Database {
             );
         ")?;
 
+        // FTS5 full-text search index (external content table backed by articles)
+        self.conn.execute_batch("
+            CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
+                title, content, summary, tags,
+                content='articles', content_rowid='id',
+                tokenize='unicode61 remove_diacritics 2'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS articles_fts_insert AFTER INSERT ON articles BEGIN
+                INSERT INTO articles_fts(rowid, title, content, summary, tags)
+                VALUES (new.id, new.title, new.content, new.summary, new.tags);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS articles_fts_delete AFTER DELETE ON articles BEGIN
+                INSERT INTO articles_fts(articles_fts, rowid, title, content, summary, tags)
+                VALUES ('delete', old.id, old.title, old.content, old.summary, old.tags);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS articles_fts_update AFTER UPDATE OF title, content, summary, tags ON articles BEGIN
+                INSERT INTO articles_fts(articles_fts, rowid, title, content, summary, tags)
+                VALUES ('delete', old.id, old.title, old.content, old.summary, old.tags);
+                INSERT INTO articles_fts(rowid, title, content, summary, tags)
+                VALUES (new.id, new.title, new.content, new.summary, new.tags);
+            END;
+        ")?;
+
+        // Meta table for tracking migration versions
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);"
+        )?;
+
+        // Rebuild FTS index if not yet done (populates from existing articles)
+        let fts_version: Option<String> = self.conn.query_row(
+            "SELECT value FROM _meta WHERE key = 'fts_version'", [], |row| row.get(0)
+        ).ok();
+        if fts_version.as_deref() != Some("1") {
+            self.conn.execute_batch("INSERT INTO articles_fts(articles_fts) VALUES('rebuild');")?;
+            self.conn.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('fts_version', '1')", [])?;
+        }
+
         Ok(())
     }
 
@@ -147,7 +250,7 @@ impl Database {
     }
 
     pub fn list_feeds(&self) -> Result<Vec<Feed>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT id, title, url, site_url, description, added_at FROM feeds")?;
+        let mut stmt = self.conn.prepare("SELECT id, title, url, site_url, description, added_at, etag, last_modified_header FROM feeds")?;
         let feeds = stmt.query_map([], |row| {
             Ok(Feed {
                 id: row.get(0)?,
@@ -161,9 +264,20 @@ impl Database {
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now())
                 },
+                etag: row.get(6)?,
+                last_modified_header: row.get(7)?,
             })
         })?.collect::<Result<Vec<_>, _>>()?;
         Ok(feeds)
+    }
+
+    /// Update ETag and Last-Modified cache headers for a feed after a successful fetch.
+    pub fn update_feed_cache_headers(&self, feed_id: i64, etag: Option<&str>, last_modified: Option<&str>) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE feeds SET etag = ?1, last_modified_header = ?2 WHERE id = ?3",
+            rusqlite::params![etag, last_modified, feed_id],
+        )?;
+        Ok(())
     }
 
     pub fn remove_feed(&self, id: i64) -> Result<bool, rusqlite::Error> {
@@ -172,9 +286,10 @@ impl Database {
     }
 
     pub fn add_articles(&self, feed_id: i64, articles: &[Article]) -> Result<usize, rusqlite::Error> {
+        let tx = self.conn.unchecked_transaction()?;
         let mut count = 0;
         for article in articles {
-            let result = self.conn.execute(
+            let result = tx.execute(
                 "INSERT OR IGNORE INTO articles (feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
@@ -192,6 +307,7 @@ impl Database {
             );
             if let Ok(n) = result { count += n; }
         }
+        tx.commit()?;
         Ok(count)
     }
 
@@ -229,7 +345,8 @@ impl Database {
     }
 
     /// Search articles with a time filter. `since` is a duration string like "24h", "7d", "30d".
-    pub fn search_articles_since(&self, query: &str, since: &str, limit: usize, feed_id: Option<i64>) -> Result<Vec<Article>, rusqlite::Error> {
+    /// When `order_by_date` is false, results are ranked by BM25 relevance (title weighted 10x).
+    pub fn search_articles_since(&self, query: &str, since: &str, limit: usize, feed_id: Option<i64>, order_by_date: bool) -> Result<Vec<Article>, rusqlite::Error> {
         let hours: i64 = if since.ends_with('d') {
             since.trim_end_matches('d').parse::<i64>().unwrap_or(1) * 24
         } else if since.ends_with('h') {
@@ -238,24 +355,54 @@ impl Database {
             24 * 365 // default: effectively no filter
         };
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
-        let pattern = format!("%{}%", query);
-        let mut sql = String::from(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
-             FROM articles
-             WHERE (title LIKE ?1 OR content LIKE ?1 OR ?1 = '%%')
-               AND (published_at >= ?2 OR published_at IS NULL)"
+
+        // Empty query: fall back to time-filtered listing on regular table
+        if query.trim().is_empty() {
+            let mut sql = String::from(
+                "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
+                 FROM articles WHERE (published_at >= ?1 OR published_at IS NULL)"
+            );
+            if feed_id.is_some() {
+                sql.push_str(" AND feed_id = ?3");
+            }
+            sql.push_str(" ORDER BY published_at DESC LIMIT ?2");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let articles = if let Some(fid) = feed_id {
+                stmt.query_map(rusqlite::params![cutoff, limit as i64, fid], |row| {
+                    Self::row_to_article(row)
+                })?.collect::<Result<Vec<_>, _>>()?
+            } else {
+                stmt.query_map(rusqlite::params![cutoff, limit as i64], |row| {
+                    Self::row_to_article(row)
+                })?.collect::<Result<Vec<_>, _>>()?
+            };
+            return Ok(articles);
+        }
+
+        let fts_query = prepare_fts_query(query);
+        let order_clause = if order_by_date {
+            "a.published_at DESC"
+        } else {
+            "bm25(articles_fts, 10.0, 1.0, 5.0, 2.0)"
+        };
+        let mut sql = format!(
+            "SELECT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at, a.tldr, a.full_content, a.tags
+             FROM articles_fts fts
+             JOIN articles a ON a.id = fts.rowid
+             WHERE articles_fts MATCH ?1
+               AND (a.published_at >= ?2 OR a.published_at IS NULL)"
         );
         if feed_id.is_some() {
-            sql.push_str(" AND feed_id = ?4");
+            sql.push_str(" AND a.feed_id = ?4");
         }
-        sql.push_str(" ORDER BY published_at DESC LIMIT ?3");
+        sql.push_str(&format!(" ORDER BY {} LIMIT ?3", order_clause));
         let mut stmt = self.conn.prepare(&sql)?;
         let articles = if let Some(fid) = feed_id {
-            stmt.query_map(rusqlite::params![pattern, cutoff, limit as i64, fid], |row| {
+            stmt.query_map(rusqlite::params![fts_query, cutoff, limit as i64, fid], |row| {
                 Self::row_to_article(row)
             })?.collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(rusqlite::params![pattern, cutoff, limit as i64], |row| {
+            stmt.query_map(rusqlite::params![fts_query, cutoff, limit as i64], |row| {
                 Self::row_to_article(row)
             })?.collect::<Result<Vec<_>, _>>()?
         };
@@ -275,6 +422,14 @@ impl Database {
                 row.get::<_, Option<String>>(2)?,
             ))
         })
+    }
+
+    pub fn get_feed_folder_id(&self, feed_id: i64) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT folder_id FROM feeds WHERE id = ?1",
+            [feed_id],
+            |row| row.get(0),
+        )
     }
 
     /// Get a single article by ID
@@ -331,23 +486,36 @@ impl Database {
         Ok(changed > 0)
     }
 
-    pub fn search_articles(&self, query: &str, feed_id: Option<i64>) -> Result<Vec<Article>, rusqlite::Error> {
-        let pattern = format!("%{}%", query);
-        let mut sql = String::from(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
-             FROM articles WHERE (title LIKE ?1 OR content LIKE ?1)"
+    /// Search articles using FTS5 full-text search.
+    /// When `order_by_date` is false, results are ranked by BM25 relevance (title weighted 10x).
+    pub fn search_articles(&self, query: &str, feed_id: Option<i64>, order_by_date: bool) -> Result<Vec<Article>, rusqlite::Error> {
+        if query.trim().is_empty() {
+            return self.list_articles(feed_id, false);
+        }
+
+        let fts_query = prepare_fts_query(query);
+        let order_clause = if order_by_date {
+            "a.published_at DESC"
+        } else {
+            "bm25(articles_fts, 10.0, 1.0, 5.0, 2.0)"
+        };
+        let mut sql = format!(
+            "SELECT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at, a.tldr, a.full_content, a.tags
+             FROM articles_fts fts
+             JOIN articles a ON a.id = fts.rowid
+             WHERE articles_fts MATCH ?1"
         );
         if feed_id.is_some() {
-            sql.push_str(" AND feed_id = ?2");
+            sql.push_str(" AND a.feed_id = ?2");
         }
-        sql.push_str(" ORDER BY published_at DESC");
+        sql.push_str(&format!(" ORDER BY {}", order_clause));
         let mut stmt = self.conn.prepare(&sql)?;
         let articles = if let Some(fid) = feed_id {
-            stmt.query_map(rusqlite::params![pattern, fid], |row| {
+            stmt.query_map(rusqlite::params![fts_query, fid], |row| {
                 Self::row_to_article(row)
             })?.collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(rusqlite::params![pattern], |row| {
+            stmt.query_map(rusqlite::params![fts_query], |row| {
                 Self::row_to_article(row)
             })?.collect::<Result<Vec<_>, _>>()?
         };
@@ -533,7 +701,7 @@ impl Database {
 
     pub fn get_smart_folder_articles(&self, query: &str, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
         let mut sql = String::from(
-            "SELECT DISTINCT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at, a.tldr
+            "SELECT DISTINCT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at, a.tldr, a.full_content, a.tags
              FROM articles a JOIN entities e ON a.id = e.article_id WHERE 1=1"
         );
         for part in query.split(" AND ") {
@@ -741,7 +909,7 @@ impl Database {
 
     pub fn get_folder_feed_articles(&self, folder_id: i64, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at, a.tldr
+            "SELECT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at, a.tldr, a.full_content, a.tags
              FROM articles a JOIN folder_feeds ff ON a.feed_id = ff.feed_id
              WHERE ff.folder_id = ?1 ORDER BY a.published_at DESC LIMIT {}", limit
         ))?;
@@ -761,7 +929,7 @@ impl Database {
     /// List feeds in a specific folder
     pub fn list_feeds_in_folder(&self, folder_id: i64) -> Result<Vec<Feed>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, site_url, description, added_at FROM feeds WHERE folder_id = ?1"
+            "SELECT id, title, url, site_url, description, added_at, etag, last_modified_header FROM feeds WHERE folder_id = ?1"
         )?;
         let feeds = stmt.query_map(rusqlite::params![folder_id], |row| {
             Ok(Feed {
@@ -776,6 +944,8 @@ impl Database {
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now())
                 },
+                etag: row.get(6)?,
+                last_modified_header: row.get(7)?,
             })
         })?.collect::<Result<Vec<_>, _>>()?;
         Ok(feeds)
@@ -788,6 +958,24 @@ impl Database {
         let changed = self.conn.execute(
             "UPDATE articles SET tags = ?1 WHERE id = ?2",
             rusqlite::params![tags, article_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Store all numeric feature columns alongside tags
+    pub fn set_article_features(
+        &self,
+        article_id: i64,
+        tags: &str,
+        word_count: usize,
+        heading_count: usize,
+        code_block_count: usize,
+        external_link_count: usize,
+        blockquote_count: usize,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE articles SET tags = ?1, word_count = ?2, heading_count = ?3, code_block_count = ?4, external_link_count = ?5, blockquote_count = ?6 WHERE id = ?7",
+            rusqlite::params![tags, word_count as i64, heading_count as i64, code_block_count as i64, external_link_count as i64, blockquote_count as i64, article_id],
         )?;
         Ok(changed > 0)
     }
@@ -807,6 +995,56 @@ impl Database {
         Ok(articles)
     }
 
+    /// Get long-form articles: word_count based, with CJK/English distinction
+    /// Falls back to tag-based query for articles not yet re-annotated (word_count = 0)
+    pub fn get_long_form_articles(&self, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        let sql = format!(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
+             FROM articles WHERE (word_count >= 800 OR (word_count = 0 AND tags LIKE '%long%'))
+             ORDER BY published_at DESC LIMIT {}",
+            limit
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt.query_map([], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    /// Count long-form articles
+    pub fn count_long_form_articles(&self) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM articles WHERE (word_count >= 800 OR (word_count = 0 AND tags LIKE '%long%'))",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    /// Get tutorial articles: requires 2+ code blocks AND (has_steps with avg item > 50 chars OR sufficient length)
+    /// Falls back to tag intersection for articles not yet re-annotated
+    pub fn get_tutorial_articles(&self, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        let sql = format!(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
+             FROM articles WHERE
+               (code_block_count >= 2 AND (tags LIKE '%has_steps%' OR word_count >= 500))
+               OR (code_block_count = 0 AND tags LIKE '%has_code%' AND tags LIKE '%has_steps%')
+             ORDER BY published_at DESC LIMIT {}",
+            limit
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt.query_map([], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    /// Count tutorial articles
+    pub fn count_tutorial_articles(&self) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM articles WHERE
+               (code_block_count >= 2 AND (tags LIKE '%has_steps%' OR word_count >= 500))
+               OR (code_block_count = 0 AND tags LIKE '%has_code%' AND tags LIKE '%has_steps%')",
+            [],
+            |row| row.get(0),
+        )
+    }
+
     /// Get articles that haven't been classified yet (alias: list_untagged_articles)
     pub fn get_unclassified_articles(&self) -> Result<Vec<Article>, rusqlite::Error> {
         self.list_untagged_articles()
@@ -821,6 +1059,45 @@ impl Database {
         )?;
         let articles = stmt.query_map([], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
         Ok(articles)
+    }
+
+    /// List untagged articles with LIMIT/OFFSET for chunked processing
+    pub fn list_untagged_articles_chunk(&self, offset: usize, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
+             FROM articles WHERE tags = '' AND (content IS NOT NULL OR summary IS NOT NULL)
+             ORDER BY published_at DESC LIMIT ?1 OFFSET ?2"
+        )?;
+        let articles = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    /// List all articles with LIMIT/OFFSET for chunked processing
+    pub fn list_articles_chunk(&self, offset: usize, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
+             FROM articles ORDER BY published_at DESC LIMIT ?1 OFFSET ?2"
+        )?;
+        let articles = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(articles)
+    }
+
+    /// Batch update article features within a single transaction
+    pub fn batch_set_article_features(
+        &self,
+        updates: &[(i64, String, usize, usize, usize, usize, usize)],
+    ) -> Result<usize, rusqlite::Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut count = 0;
+        for (article_id, tags, word_count, heading_count, code_block_count, external_link_count, blockquote_count) in updates {
+            let changed = tx.execute(
+                "UPDATE articles SET tags = ?1, word_count = ?2, heading_count = ?3, code_block_count = ?4, external_link_count = ?5, blockquote_count = ?6 WHERE id = ?7",
+                rusqlite::params![tags, *word_count as i64, *heading_count as i64, *code_block_count as i64, *external_link_count as i64, *blockquote_count as i64, article_id],
+            )?;
+            count += changed;
+        }
+        tx.commit()?;
+        Ok(count)
     }
 
     /// Clear all article tags (used during reset/re-classify)
@@ -872,7 +1149,7 @@ impl Database {
     /// Count articles for each fact-based tag
     pub fn count_all_tags(&self) -> Result<Vec<(String, i64)>, rusqlite::Error> {
         let mut results = Vec::new();
-        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images"] {
+        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images", "structured", "has_references", "link_rich"] {
             let count = self.count_articles_by_tag(tag)?;
             if count > 0 {
                 results.push((tag.to_string(), count));
@@ -894,7 +1171,7 @@ impl Database {
     /// Returns: Vec<(tag, total, read, starred, deep_read)>
     pub fn tag_engagement_stats(&self) -> Result<Vec<(String, i64, i64, i64, i64)>, rusqlite::Error> {
         let mut results = Vec::new();
-        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images"] {
+        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images", "structured", "has_references", "link_rich"] {
             let pattern = format!("%{}%", tag);
             let row: (i64, i64, i64, i64) = self.conn.query_row(
                 "SELECT COUNT(*), SUM(is_read), SUM(is_starred),
@@ -923,7 +1200,7 @@ impl Database {
     /// List feeds not in any folder
     pub fn list_uncategorized_feeds(&self) -> Result<Vec<Feed>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, site_url, description, added_at FROM feeds WHERE folder_id IS NULL"
+            "SELECT id, title, url, site_url, description, added_at, etag, last_modified_header FROM feeds WHERE folder_id IS NULL"
         )?;
         let feeds = stmt.query_map([], |row| {
             Ok(Feed {
@@ -938,8 +1215,94 @@ impl Database {
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now())
                 },
+                etag: row.get(6)?,
+                last_modified_header: row.get(7)?,
             })
         })?.collect::<Result<Vec<_>, _>>()?;
         Ok(feeds)
+    }
+
+    // ── Feed health methods ──
+
+    /// Record a successful fetch: reset errors, update response time
+    pub fn record_fetch_success(&self, feed_id: i64, response_ms: i64) -> Result<bool, rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE feeds SET last_fetch_at = ?1, last_error = NULL, fail_count = 0,
+             avg_response_ms = COALESCE((avg_response_ms + ?2) / 2, ?2)
+             WHERE id = ?3",
+            rusqlite::params![now, response_ms, feed_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Record a failed fetch: increment fail_count, store error
+    pub fn record_fetch_failure(&self, feed_id: i64, error_message: &str) -> Result<bool, rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE feeds SET last_fetch_at = ?1, last_error = ?2, fail_count = fail_count + 1
+             WHERE id = ?3",
+            rusqlite::params![now, error_message, feed_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Get feed health data for all feeds or a specific one
+    pub fn get_feed_health(&self, feed_id: Option<i64>) -> Result<Vec<FeedHealth>, rusqlite::Error> {
+        let mut sql = String::from(
+            "SELECT id, title, url, last_fetch_at, last_error, fail_count, avg_response_ms FROM feeds"
+        );
+        if feed_id.is_some() {
+            sql.push_str(" WHERE id = ?1");
+        }
+        sql.push_str(" ORDER BY fail_count DESC, title ASC");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let results = if let Some(fid) = feed_id {
+            stmt.query_map(rusqlite::params![fid], |row| {
+                Ok(FeedHealth {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    url: row.get(2)?,
+                    last_fetch_at: row.get(3)?,
+                    last_error: row.get(4)?,
+                    fail_count: row.get(5)?,
+                    avg_response_ms: row.get(6)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| {
+                Ok(FeedHealth {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    url: row.get(2)?,
+                    last_fetch_at: row.get(3)?,
+                    last_error: row.get(4)?,
+                    fail_count: row.get(5)?,
+                    avg_response_ms: row.get(6)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(results)
+    }
+}
+
+/// Prepare a raw query string for FTS5 MATCH.
+/// If the query contains FTS5 operators (AND, OR, NOT, NEAR, quotes, wildcards),
+/// pass it through as-is for advanced users. Otherwise, wrap each word as a
+/// quoted prefix search: `"word"*` joined by implicit AND.
+fn prepare_fts_query(raw: &str) -> String {
+    let has_operators = raw.contains(" AND ")
+        || raw.contains(" OR ")
+        || raw.contains(" NOT ")
+        || raw.contains(" NEAR")
+        || raw.contains('"')
+        || raw.contains('*');
+    if has_operators {
+        raw.to_string()
+    } else {
+        raw.split_whitespace()
+            .map(|w| format!("\"{}\"*", w.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
