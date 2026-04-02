@@ -70,22 +70,22 @@ pub struct SmartView {
 fn cli_path() -> String {
     let exe = std::env::current_exe().unwrap();
     let dir = exe.parent().unwrap();
-    let cli = dir.join("rss-cli");
+    let cli = dir.join("lumen");
     if cli.exists() {
         return cli.to_string_lossy().to_string();
     }
-    let cli_exe = dir.join("rss-cli.exe");
+    let cli_exe = dir.join("lumen.exe");
     if cli_exe.exists() {
         return cli_exe.to_string_lossy().to_string();
     }
-    "rss-cli".to_string()
+    "lumen".to_string()
 }
 
 fn cli(args: &[&str]) -> Result<serde_json::Value, String> {
     let output = std::process::Command::new(cli_path())
         .args(args)
         .output()
-        .map_err(|e| format!("Failed to run rss-cli: {}", e))?;
+        .map_err(|e| format!("Failed to run lumen: {}", e))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let envelope: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|e| format!("Invalid CLI output: {} — raw: {}", e, stdout))?;
@@ -230,7 +230,7 @@ async fn import_opml(data: String) -> Result<Vec<String>, String> {
     // Run CLI import in a background thread to avoid freezing the UI
     let handle = std::thread::spawn(move || {
         let tmp_dir = std::env::temp_dir();
-        let tmp_path = tmp_dir.join(format!("rss-import-{}.opml", std::process::id()));
+        let tmp_path = tmp_dir.join(format!("lumen-import-{}.opml", std::process::id()));
         std::fs::write(&tmp_path, &data)
             .map_err(|e| format!("Failed to write temp file: {}", e))?;
 

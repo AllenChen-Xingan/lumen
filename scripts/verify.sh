@@ -5,7 +5,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
 echo "========================================="
-echo "  RSS Reader Verification Report"
+echo "  Lumen Verification Report"
 echo "  $(date)"
 echo "========================================="
 echo ""
@@ -35,7 +35,7 @@ check "Rust tests pass" "cargo test 2>&1"
 
 echo ""
 echo "--- CLI Smoke Tests ---"
-CLI_BIN="$PROJECT_DIR/target/debug/rss-cli"
+CLI_BIN="$PROJECT_DIR/target/debug/lumen"
 if [ -f "$CLI_BIN" ] || [ -f "$CLI_BIN.exe" ]; then
     check "CLI --help works" "$CLI_BIN --help"
     check "CLI list works (empty)" "$CLI_BIN list"

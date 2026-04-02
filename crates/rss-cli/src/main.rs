@@ -15,7 +15,7 @@ use chrono;
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "rss", about = "Agent-native RSS reader CLI — all output is JSON")]
+#[command(name = "lumen", about = "Lumen — structured feed intelligence for agents")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -232,9 +232,17 @@ fn db_path() -> String {
         return path;
     }
     let dir = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let app_dir = dir.join("rss-reader");
-    std::fs::create_dir_all(&app_dir).ok();
-    app_dir.join("feeds.db").to_string_lossy().to_string()
+    let new_dir = dir.join("lumen");
+    let new_db = new_dir.join("feeds.db");
+    // Migration-friendly fallback: if old path exists and new doesn't, use old
+    if !new_db.exists() {
+        let old_db = dir.join("rss-reader").join("feeds.db");
+        if old_db.exists() {
+            return old_db.to_string_lossy().to_string();
+        }
+    }
+    std::fs::create_dir_all(&new_dir).ok();
+    new_db.to_string_lossy().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -243,8 +251,8 @@ fn db_path() -> String {
 
 fn describe_commands() -> Value {
     json!({
-        "name": "rss",
-        "description": "Agent-native RSS reader CLI — all output is JSON",
+        "name": "lumen",
+        "description": "Lumen — structured feed intelligence for agents",
         "compact_schema": {
             "id": "article ID (integer)",
             "t": "title",
@@ -254,7 +262,7 @@ fn describe_commands() -> Value {
             "wc": "word count of content",
             "r": "is_read (0=unread, 1=read)",
             "s": "is_starred (0=no, 1=yes)",
-            "note": "use 'rss read <id>' or 'rss fetch-full-text <id>' to get details — compact omits url/content to save tokens"
+            "note": "use 'lumen read <id>' or 'lumen fetch-full-text <id>' to get details — compact omits url/content to save tokens"
         },
         "commands": [
             {
@@ -507,7 +515,7 @@ fn write_markdown_file(id: i64, html: &str, db: &Database) -> Result<Value, Box<
     let md = rss_extract::html_to_markdown(html);
     let wc = md.split_whitespace().count();
 
-    let dir = std::env::temp_dir().join("rss-articles");
+    let dir = std::env::temp_dir().join("lumen");
     std::fs::create_dir_all(&dir)?;
 
     // Include article title in filename for agent discoverability
@@ -667,10 +675,10 @@ fn main() -> ExitCode {
     // Principle 3: no subcommand → self-describe
     let command = match cli.command {
         None => {
-            return success("rss", describe_commands(), vec![
-                action("rss list", "List all feeds", json!({})),
-                action("rss add <url>", "Add a new feed", json!({"url": {"type": "string"}})),
-                action("rss articles", "List recent articles", json!({})),
+            return success("lumen", describe_commands(), vec![
+                action("lumen list", "List all feeds", json!({})),
+                action("lumen add <url>", "Add a new feed", json!({"url": {"type": "string"}})),
+                action("lumen articles", "List recent articles", json!({})),
             ]);
         }
         Some(c) => c,
@@ -679,7 +687,7 @@ fn main() -> ExitCode {
     let db = match Database::open(&db_path()) {
         Ok(db) => db,
         Err(e) => {
-            return error("rss", &format!("Failed to open database: {}", e), "Check RSS_DB_PATH or filesystem permissions");
+            return error("lumen", &format!("Failed to open database: {}", e), "Check RSS_DB_PATH or filesystem permissions");
         }
     };
 
@@ -705,12 +713,12 @@ fn main() -> ExitCode {
                         "url": feed.url,
                         "articles_added": count,
                     }), vec![
-                        action("rss articles --feed {feed_id}", "List articles for this feed", json!({"feed_id": {"value": feed_id}})),
-                        action("rss fetch", "Fetch new articles from all feeds", json!({})),
-                        action("rss list", "List all feeds", json!({})),
+                        action("lumen articles --feed {feed_id}", "List articles for this feed", json!({"feed_id": {"value": feed_id}})),
+                        action("lumen fetch", "Fetch new articles from all feeds", json!({})),
+                        action("lumen list", "List all feeds", json!({})),
                     ])
                 }
-                Err(e) => error("add", &format!("Database error: {}", e), "Feed may already exist; use `rss list` to check"),
+                Err(e) => error("add", &format!("Database error: {}", e), "Feed may already exist; use `lumen list` to check"),
             }
         }
 
@@ -733,12 +741,12 @@ fn main() -> ExitCode {
                         val
                     }).collect();
                     let mut next = vec![
-                        action("rss add <url>", "Add a new feed", json!({"url": {"type": "string"}})),
-                        action("rss articles", "List all articles", json!({})),
+                        action("lumen add <url>", "Add a new feed", json!({"url": {"type": "string"}})),
+                        action("lumen articles", "List all articles", json!({})),
                     ];
                     for f in &feeds {
                         next.push(action(
-                            &format!("rss articles --feed {}", f.id),
+                            &format!("lumen articles --feed {}", f.id),
                             &format!("Articles from {}", f.title),
                             json!({"feed_id": {"value": f.id}}),
                         ));
@@ -758,10 +766,10 @@ fn main() -> ExitCode {
         Commands::Remove { id } => {
             match db.remove_feed(id) {
                 Ok(true) => success("remove", json!({"removed_feed_id": id}), vec![
-                    action("rss list", "List remaining feeds", json!({})),
+                    action("lumen list", "List remaining feeds", json!({})),
                 ]),
-                Ok(false) => error("remove", &format!("Feed {} not found", id), "Use `rss list` to see valid feed IDs"),
-                Err(e) => error("remove", &format!("{}", e), "Use `rss list` to see valid feed IDs"),
+                Ok(false) => error("remove", &format!("Feed {} not found", id), "Use `lumen list` to see valid feed IDs"),
+                Err(e) => error("remove", &format!("{}", e), "Use `lumen list` to see valid feed IDs"),
             }
         }
 
@@ -778,7 +786,7 @@ fn main() -> ExitCode {
                 None => feeds,
             };
             if targets.is_empty() {
-                return error("fetch", "No feeds to fetch", "Use `rss add <url>` to add feeds first");
+                return error("fetch", "No feeds to fetch", "Use `lumen add <url>` to add feeds first");
             }
 
             // Build shared HTTP client for connection pooling
@@ -850,8 +858,8 @@ fn main() -> ExitCode {
                 "annotated": annotate_result.map(|(c, t)| json!({"articles": c, "tags": t})),
                 "tldrs_generated": tldrs_generated,
             }), vec![
-                action("rss articles --unread", "List unread articles", json!({})),
-                action("rss list", "List all feeds", json!({})),
+                action("lumen articles --unread", "List unread articles", json!({})),
+                action("lumen list", "List all feeds", json!({})),
             ])
         }
 
@@ -889,19 +897,19 @@ fn main() -> ExitCode {
                     let mut next: Vec<Value> = Vec::new();
                     for a in articles.iter().take(count) {
                         next.push(action(
-                            &format!("rss read {}", a.id),
+                            &format!("lumen read {}", a.id),
                             &format!("Read: {}", a.title),
                             json!({"id": {"value": a.id}}),
                         ));
                     }
                     if truncated {
                         next.push(action(
-                            &format!("rss articles{}{} --count {}", feed.map_or(String::new(), |f| format!(" --feed {}", f)), if unread { " --unread" } else { "" }, count + 30),
+                            &format!("lumen articles{}{} --count {}", feed.map_or(String::new(), |f| format!(" --feed {}", f)), if unread { " --unread" } else { "" }, count + 30),
                             "Load more articles",
                             json!({"count": {"value": count + 30}}),
                         ));
                     }
-                    next.push(action("rss fetch", "Fetch new articles", json!({})));
+                    next.push(action("lumen fetch", "Fetch new articles", json!({})));
                     success("articles", json!({
                         "articles": page,
                         "count": page.len(),
@@ -909,7 +917,7 @@ fn main() -> ExitCode {
                         "truncated": truncated,
                     }), next)
                 }
-                Err(e) => error("articles", &format!("{}", e), "Check feed ID with `rss list`"),
+                Err(e) => error("articles", &format!("{}", e), "Check feed ID with `lumen list`"),
             }
         }
 
@@ -950,12 +958,12 @@ fn main() -> ExitCode {
                         "is_read": true,
                         "is_starred": article.is_starred,
                     }), vec![
-                        action(&format!("rss fetch-full-text {}", id), "Get full-text content", json!({"id": {"value": id}})),
-                        action(&format!("rss star {}", id), "Star this article", json!({"id": {"value": id}})),
-                        action(&format!("rss articles --feed {}", article.feed_id), "More from this feed", json!({"feed_id": {"value": article.feed_id}})),
+                        action(&format!("lumen fetch-full-text {}", id), "Get full-text content", json!({"id": {"value": id}})),
+                        action(&format!("lumen star {}", id), "Star this article", json!({"id": {"value": id}})),
+                        action(&format!("lumen articles --feed {}", article.feed_id), "More from this feed", json!({"feed_id": {"value": article.feed_id}})),
                     ])
                 }
-                Ok(None) => error("read", &format!("Article {} not found", id), "Use `rss articles` to find valid article IDs"),
+                Ok(None) => error("read", &format!("Article {} not found", id), "Use `lumen articles` to find valid article IDs"),
                 Err(e) => error("read", &format!("{}", e), "Check database"),
             }
         }
@@ -966,9 +974,9 @@ fn main() -> ExitCode {
         Commands::MarkRead { id } => {
             match db.mark_read(id) {
                 Ok(true) => success("mark-read", json!({"article_id": id, "is_read": true}), vec![
-                    action("rss articles --unread", "List remaining unread", json!({})),
+                    action("lumen articles --unread", "List remaining unread", json!({})),
                 ]),
-                Ok(false) => error("mark-read", &format!("Article {} not found", id), "Use `rss articles` to find valid IDs"),
+                Ok(false) => error("mark-read", &format!("Article {} not found", id), "Use `lumen articles` to find valid IDs"),
                 Err(e) => error("mark-read", &format!("{}", e), "Check article ID"),
             }
         }
@@ -979,10 +987,10 @@ fn main() -> ExitCode {
         Commands::Star { id } => {
             match db.toggle_star(id) {
                 Ok(true) => success("star", json!({"article_id": id, "toggled": true}), vec![
-                    action(&format!("rss read {}", id), "Read the article", json!({"id": {"value": id}})),
-                    action("rss articles", "List articles", json!({})),
+                    action(&format!("lumen read {}", id), "Read the article", json!({"id": {"value": id}})),
+                    action("lumen articles", "List articles", json!({})),
                 ]),
-                Ok(false) => error("star", &format!("Article {} not found", id), "Use `rss articles` to find valid IDs"),
+                Ok(false) => error("star", &format!("Article {} not found", id), "Use `lumen articles` to find valid IDs"),
                 Err(e) => error("star", &format!("{}", e), "Check article ID"),
             }
         }
@@ -1038,8 +1046,8 @@ fn main() -> ExitCode {
                 "imported_count": imported.len(),
                 "total_in_opml": opml_feeds.len(),
             }), vec![
-                action("rss list", "List all feeds", json!({})),
-                action("rss articles", "List articles", json!({})),
+                action("lumen list", "List all feeds", json!({})),
+                action("lumen articles", "List articles", json!({})),
             ])
         }
 
@@ -1055,8 +1063,8 @@ fn main() -> ExitCode {
                         "opml": opml_str,
                         "feed_count": pairs.len(),
                     }), vec![
-                        action("rss list", "List all feeds", json!({})),
-                        action("rss import <path>", "Import from OPML", json!({"path": {"type": "string"}})),
+                        action("lumen list", "List all feeds", json!({})),
+                        action("lumen import <path>", "Import from OPML", json!({"path": {"type": "string"}})),
                     ])
                 }
                 Err(e) => error("export", &format!("{}", e), "Check database"),
@@ -1131,14 +1139,14 @@ fn main() -> ExitCode {
                     let mut next: Vec<Value> = Vec::new();
                     for a in articles.iter().take(count) {
                         next.push(action(
-                            &format!("rss read {}", a.id),
+                            &format!("lumen read {}", a.id),
                             &format!("Read: {}", a.title),
                             json!({"id": {"value": a.id}}),
                         ));
                     }
                     if truncated {
                         next.push(action(
-                            &format!("rss search \"{}\" --count {}", query, count + 30),
+                            &format!("lumen search \"{}\" --count {}", query, count + 30),
                             "Load more results",
                             json!({"count": {"value": count + 30}}),
                         ));
@@ -1183,7 +1191,7 @@ fn main() -> ExitCode {
                 let id = id_list[0];
                 let html = match fetch_full_text_single(&db, id) {
                     Ok(h) => h,
-                    Err(e) => return error("fetch-full-text", &e, "Check article ID with `rss articles`"),
+                    Err(e) => return error("fetch-full-text", &e, "Check article ID with `lumen articles`"),
                 };
 
                 if markdown {
@@ -1198,8 +1206,8 @@ fn main() -> ExitCode {
                     "html": html,
                     "cached": true,
                 }), vec![
-                    action(&format!("rss read {}", id), "Read article metadata", json!({"id": {"value": id}})),
-                    action(&format!("rss star {}", id), "Star this article", json!({"id": {"value": id}})),
+                    action(&format!("lumen read {}", id), "Read article metadata", json!({"id": {"value": id}})),
+                    action(&format!("lumen star {}", id), "Star this article", json!({"id": {"value": id}})),
                 ]);
             }
 
@@ -1285,7 +1293,7 @@ fn main() -> ExitCode {
                         "articles_summarized": count,
                         "articles_scanned": articles.len(),
                     }), vec![
-                        action("rss articles --compact", "View articles with tldr", json!({})),
+                        action("lumen articles --compact", "View articles with tldr", json!({})),
                     ])
                 }
                 Err(e) => error("_summarize", &format!("{}", e), "Check database"),
@@ -1302,9 +1310,9 @@ fn main() -> ExitCode {
                         "articles_annotated": total,
                         "tags_assigned": total_tags,
                     }), vec![
-                        action("rss folders articles long", "View long-form articles", json!({})),
-                        action("rss folders articles tutorial", "View tutorials", json!({})),
-                        action("rss folders articles unread", "View unread", json!({})),
+                        action("lumen folders articles long", "View long-form articles", json!({})),
+                        action("lumen folders articles tutorial", "View tutorials", json!({})),
+                        action("lumen folders articles unread", "View unread", json!({})),
                     ])
                 }
                 Err(e) => error("_annotate", &e, "Check database"),
@@ -1344,7 +1352,7 @@ fn main() -> ExitCode {
                                 .collect();
                             success("entities", json!({"entities": items, "count": items.len()}), vec![])
                         }
-                        Err(e) => error("entities", &format!("{}", e), "Run `rss _classify` first"),
+                        Err(e) => error("entities", &format!("{}", e), "Run `lumen _classify` first"),
                     }
                 }
             } else {
@@ -1355,7 +1363,7 @@ fn main() -> ExitCode {
                             .collect();
                         success("entities", json!({"entities": items, "count": items.len()}), vec![])
                     }
-                    Err(e) => error("entities", &format!("{}", e), "Run `rss _classify` first"),
+                    Err(e) => error("entities", &format!("{}", e), "Run `lumen _classify` first"),
                 }
             }
         }
@@ -1394,18 +1402,18 @@ fn main() -> ExitCode {
                     }
 
                     success("folders", json!({"folders": items, "count": items.len()}), vec![
-                        action("rss folders articles unread", "View unread articles", json!({})),
-                        action("rss folders articles long", "View long-form articles", json!({})),
-                        action("rss folders articles tutorial", "View tutorials", json!({})),
-                        action("rss folders articles recent", "View today's articles", json!({})),
-                        action("rss folders create <name>", "Create manual folder", json!({})),
+                        action("lumen folders articles unread", "View unread articles", json!({})),
+                        action("lumen folders articles long", "View long-form articles", json!({})),
+                        action("lumen folders articles tutorial", "View tutorials", json!({})),
+                        action("lumen folders articles recent", "View today's articles", json!({})),
+                        action("lumen folders create <name>", "Create manual folder", json!({})),
                     ])
                 }
                 Some(FolderAction::Create { name, smart, feeds }) => {
                     if let Some(ref query) = smart {
                         match db.create_folder(&name, "smart", Some(query)) {
                             Ok(id) => success("folders", json!({"folder_id": id, "name": name, "type": "smart", "query": query}), vec![
-                                action(&format!("rss folders articles {}", id), "View folder articles", json!({})),
+                                action(&format!("lumen folders articles {}", id), "View folder articles", json!({})),
                             ]),
                             Err(e) => error("folders", &format!("{}", e), "Check query syntax"),
                         }
@@ -1426,7 +1434,7 @@ fn main() -> ExitCode {
                                     }
                                 }
                                 success("folders", json!({"action": "create", "id": id, "name": name, "type": "manual"}), vec![
-                                    action(&format!("rss folders articles {}", id), "View folder articles", json!({})),
+                                    action(&format!("lumen folders articles {}", id), "View folder articles", json!({})),
                                 ])
                             }
                             Err(e) => error("folders", &format!("{}", e), "Check parameters"),
@@ -1436,9 +1444,9 @@ fn main() -> ExitCode {
                 Some(FolderAction::Remove { id }) => {
                     match db.remove_folder(id) {
                         Ok(true) => success("folders", json!({"removed": id}), vec![
-                            action("rss folders", "List remaining folders", json!({})),
+                            action("lumen folders", "List remaining folders", json!({})),
                         ]),
-                        Ok(false) => error("folders", &format!("Folder {} not found", id), "Use `rss folders` to see IDs"),
+                        Ok(false) => error("folders", &format!("Folder {} not found", id), "Use `lumen folders` to see IDs"),
                         Err(e) => error("folders", &format!("{}", e), "Check folder ID"),
                     }
                 }
@@ -1470,10 +1478,10 @@ fn main() -> ExitCode {
                                     .collect();
                                 success("folders", json!({"folder_id": id, "articles": items, "count": items.len()}), vec![])
                             }
-                            Err(e) => error("folders", &format!("{}", e), "Use `rss folders` to see IDs"),
+                            Err(e) => error("folders", &format!("{}", e), "Use `lumen folders` to see IDs"),
                         }
                     } else {
-                        error("folders", &format!("Unknown view: {}. Use one of: unread, long, tutorial, recent, or a numeric folder ID", name), "Use `rss folders` to list available views")
+                        error("folders", &format!("Unknown view: {}. Use one of: unread, long, tutorial, recent, or a numeric folder ID", name), "Use `lumen folders` to list available views")
                     }
                 }
             }
@@ -1569,7 +1577,7 @@ fn main() -> ExitCode {
                             },
                         },
                     }), vec![
-                        action("rss read-for-me | claude \"based on these 4 dimensions, what should I read today?\"", "AI daily briefing", json!({})),
+                        action("lumen read-for-me | claude \"based on these 4 dimensions, what should I read today?\"", "AI daily briefing", json!({})),
                     ])
                 }
                 Err(e) => error("read-for-me", &format!("{}", e), "Check database"),
@@ -1629,8 +1637,8 @@ fn main() -> ExitCode {
                             "dead": dead,
                         },
                     }), vec![
-                        action("rss fetch", "Fetch all feeds (updates health data)", json!({})),
-                        action("rss list", "List all feeds", json!({})),
+                        action("lumen fetch", "Fetch all feeds (updates health data)", json!({})),
+                        action("lumen list", "List all feeds", json!({})),
                     ])
                 }
                 Err(e) => error("feed-health", &format!("{}", e), "Check database"),

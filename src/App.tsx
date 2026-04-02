@@ -900,8 +900,8 @@ export default function App() {
   });
 
   return (
-    <div class="app" aria-label="RSS Reader">
-      <h1 class="sr-only">RSS Reader</h1>
+    <div class="app" aria-label="Lumen">
+      <h1 class="sr-only">Lumen</h1>
 
       <a href="#reader-pane" class="skip-link">Skip to main content</a>
 

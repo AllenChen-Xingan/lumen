@@ -4,10 +4,10 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-CLI="$PROJECT_DIR/target/debug/rss-cli"
+CLI="$PROJECT_DIR/target/debug/lumen"
 if [ ! -f "$CLI" ] && [ ! -f "$CLI.exe" ]; then
     echo "Building CLI..."
-    cargo build -p rss-cli 2>&1
+    cargo build -p lumen 2>&1
 fi
 
 # Use .exe on Windows
@@ -15,7 +15,7 @@ if [ -f "$CLI.exe" ]; then
     CLI="$CLI.exe"
 fi
 
-TEST_DB="/tmp/rss-reader-test-$(date +%s).db"
+TEST_DB="/tmp/lumen-test-$(date +%s).db"
 export RSS_DB_PATH="$TEST_DB"
 
 PASS=0
@@ -41,7 +41,7 @@ echo "Running E2E tests..."
 echo ""
 
 # Test 1: Help
-e2e_test "CLI help" "$CLI --help" "Agent-native RSS reader"
+e2e_test "CLI help" "$CLI --help" "Lumen"
 
 # Test 2: No-args self-description (JSON envelope)
 e2e_test "Self-describe" "$CLI" '"ok":true.*compact_schema'
