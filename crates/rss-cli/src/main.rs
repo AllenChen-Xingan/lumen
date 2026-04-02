@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use rss_core::opml;
 use rss_core::parser::parse_feed;
-use rss_fetch::fetch_feed_bytes;
+use rss_fetch::{fetch_feed_bytes, fetch_feed_bytes_with_client, fetch_feed_conditional_with_client, FetchOutcome};
+use rayon::prelude::*;
 use rss_store::Database;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -58,7 +59,7 @@ enum Commands {
     Import { path: String },
     /// Export feeds as OPML
     Export,
-    /// Search articles (default: first 30 results)
+    /// Search articles using FTS5 full-text search (default: first 30 results)
     Search {
         query: String,
         #[arg(long, default_value_t = 30)]
@@ -72,6 +73,9 @@ enum Commands {
         /// Compact output (no content)
         #[arg(long)]
         compact: bool,
+        /// Sort order: "relevance" (BM25 ranking) or "date" (newest first)
+        #[arg(long, default_value = "relevance")]
+        sort: String,
     },
     /// Fetch full-text content for an article (cached)
     FetchFullText { id: i64 },
@@ -121,6 +125,13 @@ enum Commands {
         since: String,
         #[arg(long, default_value_t = 100)]
         count: usize,
+    },
+    /// Show health status for all feeds
+    FeedHealth {
+        #[arg(long)]
+        feed: Option<i64>,
+        #[arg(long)]
+        compact: bool,
     },
 }
 
@@ -292,12 +303,14 @@ fn describe_commands() -> Value {
             },
             {
                 "name": "search",
-                "description": "Full-text search across articles (default: first 30)",
+                "description": "FTS5 full-text search across articles with BM25 relevance ranking. Supports boolean operators (AND, OR, NOT), phrase matching (\"exact phrase\"), prefix wildcards (term*), and NEAR queries.",
                 "args": [
-                    {"name": "query", "type": "string", "required": true, "description": "Search query"},
+                    {"name": "query", "type": "string", "required": true, "description": "Search query (plain words, or FTS5 syntax: AND/OR/NOT, \"phrase\", prefix*)"},
                     {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"},
+                    {"name": "--feed", "type": "integer", "required": false, "description": "Filter by feed ID"},
                     {"name": "--since", "type": "string", "required": false, "description": "Time filter: 24h, 7d, 30d"},
-                    {"name": "--compact", "type": "boolean", "required": false, "description": "Agent-friendly compact output"}
+                    {"name": "--compact", "type": "boolean", "required": false, "description": "Agent-friendly compact output"},
+                    {"name": "--sort", "type": "string", "required": false, "description": "Sort: 'relevance' (BM25, default) or 'date' (newest first)"}
                 ]
             },
             {
@@ -334,6 +347,14 @@ fn describe_commands() -> Value {
                     {"name": "--since", "type": "string", "required": false, "description": "Time window (default 24h, e.g. 7d)"},
                     {"name": "--count", "type": "integer", "required": false, "description": "Max articles (default 100)"}
                 ]
+            },
+            {
+                "name": "feed-health",
+                "description": "Show health status for all feeds (response times, errors, fail counts)",
+                "args": [
+                    {"name": "--feed", "type": "integer", "required": false, "description": "Filter to a specific feed ID"},
+                    {"name": "--compact", "type": "boolean", "required": false, "description": "Compact output (omit url, last_fetch_at, last_error)"}
+                ]
             }
         ]
     })
@@ -345,7 +366,10 @@ fn describe_commands() -> Value {
 
 fn article_snippet(a: &rss_core::Article) -> Value {
     let content = a.content.as_deref().or(a.summary.as_deref()).unwrap_or("");
-    let snippet = if content.len() > 300 { &content[..300] } else { content };
+    let snippet = if content.len() > 300 {
+        let end = content.char_indices().take_while(|&(i, _)| i < 300).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(content.len().min(300));
+        &content[..end]
+    } else { content };
     let clean = rss_ner::strip_html(snippet);
     json!({
         "id": a.id,
@@ -371,12 +395,16 @@ fn generate_tldr(article: &rss_core::Article) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    let truncated = if text.len() > 500 { &text[..500] } else { text };
+    let truncated = if text.len() > 500 {
+        let end = text.char_indices().take_while(|&(i, _)| i < 500).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(text.len().min(500));
+        &text[..end]
+    } else { text };
 
     // Find first sentence boundary
     let sentence = extract_first_sentence(truncated);
     let result = if sentence.len() > 150 {
-        format!("{}...", &sentence[..147])
+        let end = sentence.char_indices().take_while(|&(i, _)| i < 147).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(sentence.len().min(147));
+        format!("{}...", &sentence[..end])
     } else {
         sentence
     };
@@ -397,9 +425,10 @@ fn extract_first_sentence(text: &str) -> String {
     for (i, c) in text.char_indices() {
         if (c == '.' || c == '!' || c == '?' || c == '\u{3002}' /* Chinese period */) && i > 10 {
             // Check it's not an abbreviation (e.g., "U.S.")
-            let next_char = text[i + c.len_utf8()..].chars().next();
+            let end = i + c.len_utf8();
+            let next_char = text[end..].chars().next();
             if next_char.map_or(true, |nc| nc.is_whitespace() || nc == '\n') {
-                return text[..=i].to_string();
+                return text[..end].to_string();
             }
         }
         // Also break on newline if we have enough text
@@ -408,9 +437,10 @@ fn extract_first_sentence(text: &str) -> String {
         }
     }
 
-    // No sentence boundary found, just take first 150 chars
+    // No sentence boundary found, just take first ~150 chars at a char boundary
     if text.len() > 150 {
-        format!("{}...", &text[..147])
+        let end = text.char_indices().take_while(|&(i, _)| i < 147).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(147.min(text.len()));
+        format!("{}...", &text[..end])
     } else {
         text.to_string()
     }
@@ -441,35 +471,76 @@ fn annotate_articles(db: &Database, force: bool, single_article: Option<i64>) ->
         db.clear_all_tags().map_err(|e| format!("{}", e))?;
     }
 
-    let articles = match single_article {
-        Some(id) => {
-            match db.list_articles(None, false) {
-                Ok(all) => all.into_iter().filter(|a| a.id == id).collect::<Vec<_>>(),
-                Err(e) => return Err(format!("{}", e)),
-            }
+    // Single article mode: no chunking needed
+    if let Some(id) = single_article {
+        let articles = match db.list_articles(None, false) {
+            Ok(all) => all.into_iter().filter(|a| a.id == id).collect::<Vec<_>>(),
+            Err(e) => return Err(format!("{}", e)),
+        };
+        let mut total_tags = 0;
+        for a in &articles {
+            let content = a.full_content.as_deref()
+                .or(a.content.as_deref())
+                .or(a.summary.as_deref())
+                .unwrap_or("");
+            let features = rss_ner::detect_features(&a.title, content);
+            let tags_str = rss_ner::features_to_tags(&features);
+            total_tags += tags_str.matches(',').count() + 1;
+            db.set_article_features(
+                a.id, &tags_str, features.word_count, features.heading_count,
+                features.code_block_count, features.external_link_count, features.blockquote_count,
+            ).ok();
         }
-        None => {
-            if force {
-                db.list_articles(None, false).map_err(|e| format!("{}", e))?
-            } else {
-                db.list_untagged_articles().map_err(|e| format!("{}", e))?
-            }
-        }
-    };
+        return Ok((articles.len(), total_tags));
+    }
 
-    let total = articles.len();
+    // Chunked processing: fetch 500 articles at a time
+    const CHUNK_SIZE: usize = 500;
+    let mut total = 0;
     let mut total_tags = 0;
+    let mut offset = 0;
 
-    for a in &articles {
-        let content = a.full_content.as_deref()
-            .or(a.content.as_deref())
-            .or(a.summary.as_deref())
-            .unwrap_or("");
+    loop {
+        let articles = if force {
+            db.list_articles_chunk(offset, CHUNK_SIZE).map_err(|e| format!("{}", e))?
+        } else {
+            db.list_untagged_articles_chunk(offset, CHUNK_SIZE).map_err(|e| format!("{}", e))?
+        };
 
-        let features = rss_ner::detect_features(&a.title, content);
-        let tags_str = rss_ner::features_to_tags(&features);
-        total_tags += tags_str.matches(',').count() + 1;
-        db.set_article_tags(a.id, &tags_str).ok();
+        if articles.is_empty() {
+            break;
+        }
+
+        let chunk_len = articles.len();
+        let mut updates: Vec<(i64, String, usize, usize, usize, usize, usize)> = Vec::with_capacity(chunk_len);
+
+        for a in &articles {
+            let content = a.full_content.as_deref()
+                .or(a.content.as_deref())
+                .or(a.summary.as_deref())
+                .unwrap_or("");
+
+            let features = rss_ner::detect_features(&a.title, content);
+            let tags_str = rss_ner::features_to_tags(&features);
+            total_tags += tags_str.matches(',').count() + 1;
+            updates.push((
+                a.id, tags_str, features.word_count, features.heading_count,
+                features.code_block_count, features.external_link_count, features.blockquote_count,
+            ));
+        }
+
+        db.batch_set_article_features(&updates).map_err(|e| format!("{}", e))?;
+        total += chunk_len;
+
+        // For untagged mode, always use offset 0 since processed articles leave the result set.
+        // For force mode, advance offset since all articles are returned regardless.
+        if force {
+            offset += chunk_len;
+        }
+
+        if chunk_len < CHUNK_SIZE {
+            break;
+        }
     }
 
     Ok((total, total_tags))
@@ -560,6 +631,9 @@ fn main() -> ExitCode {
                             val["unread_count"] = json!(unread);
                             val["last_fetched"] = json!(last_fetched);
                         }
+                        if let Ok(fid) = db.get_feed_folder_id(f.id) {
+                            val["folder_id"] = json!(fid);
+                        }
                         val
                     }).collect();
                     let mut next = vec![
@@ -610,20 +684,51 @@ fn main() -> ExitCode {
             if targets.is_empty() {
                 return error("fetch", "No feeds to fetch", "Use `rss add <url>` to add feeds first");
             }
+
+            // Build shared HTTP client for connection pooling
+            rayon::ThreadPoolBuilder::new().num_threads(64).build_global().ok();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build().map_err(|e| format!("{}", e)).unwrap();
+
+            // Phase 1: parallel HTTP fetches (no DB access)
+            let fetch_results: Vec<_> = targets.par_iter().map(|f| {
+                let t0 = std::time::Instant::now();
+                let result = fetch_feed_conditional_with_client(
+                    &client, &f.url, f.etag.as_deref(), f.last_modified_header.as_deref()
+                ).map_err(|e| format!("{}", e));
+                (f, result, t0.elapsed().as_millis() as i64)
+            }).collect();
+
+            // Phase 2: sequential DB writes
             let mut results = Vec::new();
-            for f in &targets {
-                match fetch_feed_bytes(&f.url) {
-                    Ok(bytes) => match parse_feed(&f.url, &bytes) {
-                        Ok((_, articles)) => {
-                            let count = db.add_articles(f.id, &articles).unwrap_or(0);
-                            results.push(json!({"feed_id": f.id, "title": f.title, "new_articles": count}));
+            let mut feeds_skipped_304: usize = 0;
+            for (f, result, elapsed_ms) in fetch_results {
+                match result {
+                    Ok(FetchOutcome::NotModified) => {
+                        db.record_fetch_success(f.id, elapsed_ms).ok();
+                        feeds_skipped_304 += 1;
+                        results.push(json!({"feed_id": f.id, "title": f.title, "new_articles": 0, "not_modified": true, "response_ms": elapsed_ms}));
+                    }
+                    Ok(FetchOutcome::Modified { bytes, etag, last_modified }) => {
+                        db.update_feed_cache_headers(f.id, etag.as_deref(), last_modified.as_deref()).ok();
+                        match parse_feed(&f.url, &bytes) {
+                            Ok((_, articles)) => {
+                                let count = db.add_articles(f.id, &articles).unwrap_or(0);
+                                db.record_fetch_success(f.id, elapsed_ms).ok();
+                                results.push(json!({"feed_id": f.id, "title": f.title, "new_articles": count, "response_ms": elapsed_ms}));
+                            }
+                            Err(e) => {
+                                let err_str = format!("{}", e);
+                                db.record_fetch_failure(f.id, &err_str).ok();
+                                results.push(json!({"feed_id": f.id, "title": f.title, "error": err_str}));
+                            }
                         }
-                        Err(e) => {
-                            results.push(json!({"feed_id": f.id, "title": f.title, "error": format!("{}", e)}));
-                        }
-                    },
+                    }
                     Err(e) => {
-                        results.push(json!({"feed_id": f.id, "title": f.title, "error": format!("{}", e)}));
+                        let err_str = format!("{}", e);
+                        db.record_fetch_failure(f.id, &err_str).ok();
+                        results.push(json!({"feed_id": f.id, "title": f.title, "error": err_str}));
                     }
                 }
             }
@@ -644,6 +749,7 @@ fn main() -> ExitCode {
 
             success("fetch", json!({
                 "feeds_fetched": results.len(),
+                "feeds_skipped_304": feeds_skipped_304,
                 "results": results,
                 "annotated": annotate_result.map(|(c, t)| json!({"articles": c, "tags": t})),
                 "tldrs_generated": tldrs_generated,
@@ -728,7 +834,10 @@ fn main() -> ExitCode {
                         .or(article.summary.as_deref())
                         .unwrap_or("");
                     let clean = rss_ner::strip_html(raw_content);
-                    let content_preview = if clean.len() > 500 { &clean[..500] } else { &clean };
+                    let content_preview = if clean.len() > 500 {
+                        let end = clean.char_indices().take_while(|&(i, _)| i < 500).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(clean.len().min(500));
+                        &clean[..end]
+                    } else { &clean };
                     let word_count = clean.split_whitespace().count();
 
                     success("read", json!({
@@ -794,21 +903,37 @@ fn main() -> ExitCode {
                 Ok(f) => f,
                 Err(e) => return error("import", &format!("OPML parse error: {}", e), "Ensure the file is valid OPML"),
             };
+
+            // Build shared HTTP client for connection pooling
+            rayon::ThreadPoolBuilder::new().num_threads(64).build_global().ok();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build().map_err(|e| format!("{}", e)).unwrap();
+
+            // Phase 1: parallel HTTP fetches + parsing (no DB access)
+            let fetch_results: Vec<_> = opml_feeds.par_iter().map(|of| {
+                let result = fetch_feed_bytes_with_client(&client, &of.xml_url)
+                    .map_err(|e| format!("Fetch: {}", e))
+                    .and_then(|bytes| {
+                        parse_feed(&of.xml_url, &bytes)
+                            .map_err(|e| format!("Parse: {}", e))
+                    });
+                (of, result)
+            }).collect();
+
+            // Phase 2: sequential DB writes
             let mut imported = Vec::new();
             let mut errors = Vec::new();
-            for of in &opml_feeds {
-                match fetch_feed_bytes(&of.xml_url) {
-                    Ok(bytes) => match parse_feed(&of.xml_url, &bytes) {
-                        Ok((feed, articles)) => match db.add_feed(&feed) {
-                            Ok(feed_id) => {
-                                let count = db.add_articles(feed_id, &articles).unwrap_or(0);
-                                imported.push(json!({"feed_id": feed_id, "title": feed.title, "articles_added": count}));
-                            }
-                            Err(e) => errors.push(json!({"title": of.title, "error": format!("{}", e)})),
-                        },
-                        Err(e) => errors.push(json!({"title": of.title, "error": format!("Parse: {}", e)})),
+            for (of, result) in fetch_results {
+                match result {
+                    Ok((feed, articles)) => match db.add_feed(&feed) {
+                        Ok(feed_id) => {
+                            let count = db.add_articles(feed_id, &articles).unwrap_or(0);
+                            imported.push(json!({"feed_id": feed_id, "title": feed.title, "articles_added": count}));
+                        }
+                        Err(e) => errors.push(json!({"title": of.title, "error": format!("{}", e)})),
                     },
-                    Err(e) => errors.push(json!({"title": of.title, "error": format!("Fetch: {}", e)})),
+                    Err(e) => errors.push(json!({"title": of.title, "error": format!("{}", e)})),
                 }
             }
             success("import", json!({
@@ -845,11 +970,12 @@ fn main() -> ExitCode {
         // ---------------------------------------------------------------
         // SEARCH
         // ---------------------------------------------------------------
-        Commands::Search { query, count, feed, since, compact } => {
+        Commands::Search { query, count, feed, since, compact, sort } => {
+            let order_by_date = sort == "date";
             let search_result = if let Some(ref since_str) = since {
-                db.search_articles_since(&query, since_str, count, feed)
+                db.search_articles_since(&query, since_str, count, feed, order_by_date)
             } else {
-                db.search_articles(&query, feed)
+                db.search_articles(&query, feed, order_by_date)
             };
             match search_result {
                 Ok(articles) => {
@@ -1093,16 +1219,16 @@ fn main() -> ExitCode {
                     let unread_count = db.list_articles(None, true).map(|a| a.len()).unwrap_or(0);
                     items.push(json!({"id": null, "name": "unread", "type": "smart_view", "description": "Unread articles", "article_count": unread_count}));
 
-                    // "long" — articles tagged as long
-                    let long_count = db.count_articles_by_tag("long").unwrap_or(0);
-                    items.push(json!({"id": null, "name": "long", "type": "smart_view", "description": "Long-form articles", "article_count": long_count}));
+                    // "long" — word_count based long-form detection
+                    let long_count = db.count_long_form_articles().unwrap_or(0);
+                    items.push(json!({"id": null, "name": "long", "type": "smart_view", "description": "Long-form articles (800+ words)", "article_count": long_count}));
 
-                    // "tutorial" — articles with code or steps
-                    let tutorial_count = db.count_articles_with_any_tag(&["has_code", "has_steps"]).unwrap_or(0);
-                    items.push(json!({"id": null, "name": "tutorial", "type": "smart_view", "description": "Articles with code or steps", "article_count": tutorial_count}));
+                    // "tutorial" — requires multiple code blocks + steps or sufficient length
+                    let tutorial_count = db.count_tutorial_articles().unwrap_or(0);
+                    items.push(json!({"id": null, "name": "tutorial", "type": "smart_view", "description": "Tutorials (2+ code blocks with steps)", "article_count": tutorial_count}));
 
                     // "recent" — today's articles
-                    let recent_count = db.search_articles_since("", "24h", 9999, None).map(|a| a.len()).unwrap_or(0);
+                    let recent_count = db.search_articles_since("", "24h", 9999, None, true).map(|a| a.len()).unwrap_or(0);
                     items.push(json!({"id": null, "name": "recent", "type": "smart_view", "description": "Today's articles", "article_count": recent_count}));
 
                     // Add manual folders from DB
@@ -1166,9 +1292,9 @@ fn main() -> ExitCode {
                     if is_smart_view(&name) {
                         let result = match name.as_str() {
                             "unread" => db.list_articles(None, true),
-                            "long" => db.get_articles_by_tag("long", count),
-                            "tutorial" => db.get_articles_with_any_tag(&["has_code", "has_steps"], count),
-                            "recent" => db.search_articles_since("", "24h", count, None),
+                            "long" => db.get_long_form_articles(count),
+                            "tutorial" => db.get_tutorial_articles(count),
+                            "recent" => db.search_articles_since("", "24h", count, None, true),
                             _ => unreachable!(),
                         };
                         match result {
@@ -1292,6 +1418,67 @@ fn main() -> ExitCode {
                     ])
                 }
                 Err(e) => error("read-for-me", &format!("{}", e), "Check database"),
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // FEED-HEALTH
+        // ---------------------------------------------------------------
+        Commands::FeedHealth { feed, compact } => {
+            match db.get_feed_health(feed) {
+                Ok(health) => {
+                    let mut healthy = 0i64;
+                    let mut degraded = 0i64;
+                    let mut dead = 0i64;
+
+                    let items: Vec<serde_json::Value> = health.iter().map(|h| {
+                        let status = if h.fail_count == 0 {
+                            healthy += 1;
+                            "healthy"
+                        } else if h.fail_count <= 3 {
+                            degraded += 1;
+                            "degraded"
+                        } else {
+                            dead += 1;
+                            "dead"
+                        };
+                        if compact {
+                            json!({
+                                "id": h.id,
+                                "title": h.title,
+                                "status": status,
+                                "fail_count": h.fail_count,
+                                "avg_response_ms": h.avg_response_ms,
+                            })
+                        } else {
+                            json!({
+                                "id": h.id,
+                                "title": h.title,
+                                "url": h.url,
+                                "status": status,
+                                "last_fetch_at": h.last_fetch_at,
+                                "last_error": h.last_error,
+                                "fail_count": h.fail_count,
+                                "avg_response_ms": h.avg_response_ms,
+                            })
+                        }
+                    }).collect();
+
+                    let total = items.len() as i64;
+                    success("feed-health", json!({
+                        "feeds": items,
+                        "summary": {
+                            "total": total,
+                            "healthy": healthy,
+                            "degraded": degraded,
+                            "dead": dead,
+                        },
+                    }), vec![
+                        action("rss fetch", "Fetch all feeds (updates health data)", json!({})),
+                        action("rss list", "List all feeds", json!({})),
+                    ])
+                }
+                Err(e) => error("feed-health", &format!("{}", e), "Check database"),
             }
         }
     }
