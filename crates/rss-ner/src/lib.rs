@@ -10,10 +10,20 @@ pub struct ArticleFeatures {
     pub word_count: usize,
     /// Contains code blocks (``` or <code> or <pre>)
     pub has_code: bool,
+    /// Number of distinct code blocks
+    pub code_block_count: usize,
     /// Contains numbered/ordered list (step-by-step patterns)
     pub has_steps: bool,
+    /// Average character length of list items (0 if no list)
+    pub avg_list_item_length: usize,
     /// Contains images (<img> tags)
     pub has_images: bool,
+    /// Number of heading tags (h1-h6, or markdown #)
+    pub heading_count: usize,
+    /// Number of blockquote elements
+    pub blockquote_count: usize,
+    /// Number of external links (<a href="http...">)
+    pub external_link_count: usize,
 }
 
 /// Strip HTML tags for text processing
@@ -58,26 +68,37 @@ pub fn detect_features(title: &str, content: &str) -> ArticleFeatures {
     // Word count (split on whitespace + CJK char counting)
     let word_count = count_words(&combined);
 
-    // Code detection: markdown code fences or HTML code/pre tags
-    let has_code = content.contains("```")
-        || content.contains("<code")
-        || content.contains("<pre")
-        || content.contains("&lt;code")
-        || content.contains("&lt;pre");
+    // Code detection + count
+    let code_block_count = count_code_blocks(content);
+    let has_code = code_block_count > 0;
 
-    // Step detection: ordered lists or step-by-step patterns
-    let has_steps = detect_steps(content, &text);
+    // Step detection + average list item length
+    let (has_steps, avg_list_item_length) = detect_steps_detailed(content, &text);
 
     // Image detection
     let has_images = content.contains("<img")
         || content.contains("![");
 
+    // Heading count: HTML h1-h6 tags
+    let heading_count = count_headings(content);
+
+    // Blockquote count
+    let blockquote_count = count_occurrences(content, "<blockquote");
+
+    // External link count
+    let external_link_count = count_external_links(content);
+
     ArticleFeatures {
         length,
         word_count,
         has_code,
+        code_block_count,
         has_steps,
+        avg_list_item_length,
         has_images,
+        heading_count,
+        blockquote_count,
+        external_link_count,
     }
 }
 
@@ -95,6 +116,21 @@ pub fn features_to_tags(features: &ArticleFeatures) -> String {
     }
     if features.has_images {
         tags.push("has_images");
+    }
+
+    // "structured" = has heading hierarchy (2+ headings)
+    if features.heading_count >= 2 {
+        tags.push("structured");
+    }
+
+    // "has_references" = has blockquotes (cited sources)
+    if features.blockquote_count >= 1 {
+        tags.push("has_references");
+    }
+
+    // "link_rich" = 3+ external links (well-sourced)
+    if features.external_link_count >= 3 {
+        tags.push("link_rich");
     }
 
     tags.join(",")
@@ -136,32 +172,111 @@ fn is_cjk(ch: char) -> bool {
         || (0x3000..=0x303F).contains(&cp) // CJK Punctuation
 }
 
-fn detect_steps(html: &str, text: &str) -> bool {
-    // HTML ordered list
-    if html.contains("<ol") {
-        return true;
-    }
+/// Count code blocks: markdown fences (```) and HTML <code>/<pre> tags
+fn count_code_blocks(html: &str) -> usize {
+    let fence_count = html.matches("```").count() / 2; // pairs of fences
+    let code_tags = count_occurrences(html, "<code");
+    let pre_tags = count_occurrences(html, "<pre");
+    let escaped_code = count_occurrences(html, "&lt;code");
+    let escaped_pre = count_occurrences(html, "&lt;pre");
+    fence_count + code_tags + pre_tags + escaped_code + escaped_pre
+}
 
-    // Markdown/text patterns: "1. ", "Step 1", "第一步", "步骤"
-    let lines: Vec<&str> = text.lines().collect();
-    let mut numbered_count = 0;
-    for line in &lines {
-        let trimmed = line.trim();
-        // "1. something", "2. something" etc
-        if trimmed.len() > 2 {
-            let first_char = trimmed.chars().next().unwrap_or(' ');
-            if first_char.is_ascii_digit() && (trimmed.contains(". ") || trimmed.contains("）") || trimmed.contains(") ")) {
-                numbered_count += 1;
+/// Count headings: HTML h1-h6 tags
+fn count_headings(html: &str) -> usize {
+    let mut count = 0;
+    for level in 1..=6 {
+        let tag = format!("<h{}", level);
+        count += count_occurrences(html, &tag);
+    }
+    count
+}
+
+/// Count external links: <a href="http..."> or <a href="https...">
+fn count_external_links(html: &str) -> usize {
+    let mut count = 0;
+    let lower = html.to_lowercase();
+    let mut search_from = 0;
+    while let Some(pos) = lower[search_from..].find("<a ") {
+        let abs = search_from + pos;
+        // Find the closing '>' to delimit the tag — safe boundary
+        let tag_end = lower[abs..].find('>').map(|p| abs + p + 1).unwrap_or(lower.len());
+        let chunk = &lower[abs..tag_end];
+        if chunk.contains("href=\"http://") || chunk.contains("href=\"https://")
+            || chunk.contains("href='http://") || chunk.contains("href='https://") {
+            count += 1;
+        }
+        search_from = tag_end;
+    }
+    count
+}
+
+/// Count non-overlapping occurrences of a substring (case-sensitive)
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
+/// Detect steps and compute average list item length.
+/// Returns (has_steps, avg_list_item_length).
+fn detect_steps_detailed(html: &str, text: &str) -> (bool, usize) {
+    let mut item_lengths: Vec<usize> = Vec::new();
+
+    // Collect <li> content lengths from HTML
+    // Use lowercase copy for both search and extraction to avoid byte-index mismatch
+    {
+        let lower = html.to_lowercase();
+        let mut search_from = 0;
+        while let Some(start) = lower[search_from..].find("<li") {
+            let abs_start = search_from + start;
+            if let Some(gt) = lower[abs_start..].find('>') {
+                let content_start = abs_start + gt + 1;
+                let content_end = lower[content_start..].find("</li>")
+                    .map(|p| content_start + p)
+                    .unwrap_or(lower.len());
+                let item_text = strip_html(&lower[content_start..content_end]);
+                let len = item_text.trim().chars().count();
+                if len > 0 {
+                    item_lengths.push(len);
+                }
+                search_from = content_end;
+            } else {
+                break;
             }
         }
     }
 
-    // 3+ numbered items = likely has steps
-    if numbered_count >= 3 {
-        return true;
+    // Also check text-based numbered lines
+    let mut numbered_items: Vec<usize> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() > 2 {
+            let first_char = trimmed.chars().next().unwrap_or(' ');
+            if first_char.is_ascii_digit()
+                && (trimmed.contains(". ") || trimmed.contains("）") || trimmed.contains(") "))
+            {
+                numbered_items.push(trimmed.chars().count());
+            }
+        }
     }
 
-    // Chinese step patterns
-    text.contains("步骤") || text.contains("第一步") || text.contains("Step ")
+    // Use whichever source found more items
+    let items = if item_lengths.len() >= numbered_items.len() {
+        &item_lengths
+    } else {
+        &numbered_items
+    };
 
+    let has_ordered_list = html.contains("<ol");
+    let has_step_keywords = text.contains("步骤") || text.contains("第一步") || text.contains("Step ");
+    let has_numbered = items.len() >= 3;
+
+    let has_steps = has_ordered_list || has_step_keywords || has_numbered;
+
+    let avg_len = if items.is_empty() {
+        0
+    } else {
+        items.iter().sum::<usize>() / items.len()
+    };
+
+    (has_steps, avg_len)
 }
