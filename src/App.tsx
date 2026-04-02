@@ -1,5 +1,6 @@
 import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 interface Feed {
   id: number;
@@ -8,6 +9,7 @@ interface Feed {
   site_url: string | null;
   description: string | null;
   added_at: string;
+  folder_id: number | null;
 }
 
 interface Article {
@@ -21,6 +23,10 @@ interface Article {
   is_read: boolean;
   is_starred: boolean;
   fetched_at: string;
+  tldr: string | null;
+  guid: string | null;
+  full_content: string | null;
+  tags: string | null;
 }
 
 interface Folder {
@@ -52,9 +58,19 @@ export default function App() {
   const [folders, setFolders] = createSignal<Folder[]>([]);
   const [selectedFolder, setSelectedFolder] = createSignal<string | null>(null);
   const [feedBusy, setFeedBusy] = createSignal(false);
+  const [hasMore, setHasMore] = createSignal(false);
+  const [articleOffset, setArticleOffset] = createSignal(0);
+  const PAGE_SIZE = 50;
+  const [showNewFolder, setShowNewFolder] = createSignal(false);
+  const [newFolderName, setNewFolderName] = createSignal("");
+  const [pendingMoveFeedId, setPendingMoveFeedId] = createSignal<number | null>(null);
+  const [manageMode, setManageMode] = createSignal(false);
+  const [selectedFeedIds, setSelectedFeedIds] = createSignal<Set<number>>(new Set());
+  const [bulkTargetFolder, setBulkTargetFolder] = createSignal<number | null>(null);
 
   const [expandedSections, setExpandedSections] = createSignal<Record<string, boolean>>({
     "smart-folders": true,
+    "manual-folders": true,
     "feeds": true,
   });
   const [contextMenu, setContextMenu] = createSignal<{
@@ -142,21 +158,38 @@ export default function App() {
     }
   };
 
-  const loadArticles = async (feedId?: number) => {
+  const loadArticles = async (feedId?: number, append?: boolean) => {
     setFeedBusy(true);
+    const offset = append ? articleOffset() : 0;
+    if (!append) {
+      setArticleOffset(0);
+    }
     try {
-      const result = await invoke<Article[]>("list_articles", {
+      const result = await invoke<{ articles: Article[]; has_more: boolean; offset: number; count: number }>("list_articles", {
         feedId: feedId ?? null,
         unreadOnly: false,
+        count: PAGE_SIZE,
+        offset,
       });
-      setArticles(result);
-      const total = result.length;
-      const unread = result.filter((a) => !a.is_read).length;
-      setStatus(`${total} articles, ${unread} unread`);
+      if (append) {
+        setArticles(prev => [...prev, ...result.articles]);
+      } else {
+        setArticles(result.articles);
+      }
+      setHasMore(result.has_more);
+      setArticleOffset(offset + result.articles.length);
+      const total = articles().length;
+      const unread = articles().filter((a) => !a.is_read).length;
+      setStatus(`${total} articles${result.has_more ? "+" : ""}, ${unread} unread`);
     } catch (e) {
       setStatus(`Error: ${e}`);
     }
     setFeedBusy(false);
+  };
+
+  const loadMoreArticles = async () => {
+    const feedId = selectedFeed();
+    await loadArticles(feedId ?? undefined, true);
   };
 
   const addFeed = async () => {
@@ -199,6 +232,52 @@ export default function App() {
     }
   };
 
+  const createNewFolder = async (name: string, moveFeedId?: number) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    try {
+      const folder = await invoke<{ id: number; name: string }>("create_folder", { name: trimmed });
+      setStatus(`Created folder: ${folder.name}`);
+      if (moveFeedId) {
+        await invoke("move_feed", { feedId: moveFeedId, folderId: folder.id });
+        setStatus(`Created "${folder.name}" and moved feed`);
+      }
+      await loadFolders();
+      await loadFeeds();
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
+    setNewFolderName("");
+    setShowNewFolder(false);
+    setPendingMoveFeedId(null);
+  };
+
+  const toggleFeedSelection = (feedId: number) => {
+    setSelectedFeedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(feedId)) next.delete(feedId);
+      else next.add(feedId);
+      return next;
+    });
+  };
+
+  const bulkMoveFeeds = async (folderId: number | null) => {
+    const ids = Array.from(selectedFeedIds());
+    if (ids.length === 0) return;
+    try {
+      for (const feedId of ids) {
+        await invoke("move_feed", { feedId, folderId });
+      }
+      setStatus(`Moved ${ids.length} feeds`);
+      setSelectedFeedIds(new Set<number>());
+      setManageMode(false);
+      await loadFolders();
+      await loadFeeds();
+    } catch (e) {
+      setStatus(`Error: ${e}`);
+    }
+  };
+
   // Context menu helpers
   const openContextMenu = (x: number, y: number, type: "feed" | "folder", id: number) => {
     setContextMenu({ x, y, type, id });
@@ -225,21 +304,33 @@ export default function App() {
               await invoke("move_feed", { feedId: menu.id, folderId: f.id });
               setStatus(`Moved feed to ${f.name}`);
               await loadFeeds();
+              await loadFolders();
             } catch (e) { setStatus(`Error: ${e}`); }
             closeContextMenu();
           },
         })),
         {
+          label: "New folder...",
+          action: () => {
+            setPendingMoveFeedId(menu.id);
+            setShowNewFolder(true);
+            closeContextMenu();
+            requestAnimationFrame(() => document.getElementById("new-folder-name")?.focus());
+          },
+        },
+        // Only show Uncategorize if the feed is currently in a folder
+        ...(feeds().find(f => f.id === menu.id)?.folder_id ? [{
           label: "Uncategorize",
           action: async () => {
             try {
               await invoke("move_feed", { feedId: menu.id, folderId: null });
               setStatus("Feed uncategorized");
               await loadFeeds();
+              await loadFolders();
             } catch (e) { setStatus(`Error: ${e}`); }
             closeContextMenu();
           },
-        },
+        }] : []),
         {
           label: "Delete feed",
           action: () => {
@@ -251,6 +342,13 @@ export default function App() {
     }
     if (menu.type === "folder") {
       return [
+        {
+          label: "Rename folder",
+          action: () => {
+            // TODO: rename not yet in CLI — just close for now
+            closeContextMenu();
+          },
+        },
         {
           label: "Delete folder",
           action: async () => {
@@ -326,20 +424,14 @@ export default function App() {
 
   const fetchAll = async () => {
     setFeedBusy(true);
-    setStatus("Fetching...");
+    setStatus("Fetching feeds...");
     try {
-      const results = await invoke<Array<{ feed_id: number; title: string; new_articles: number; error?: string }>>("fetch_feeds");
-      const statusText = results.map(r => r.error ? `${r.title}: ${r.error}` : `${r.title}: ${r.new_articles} new`).join("; ");
-      setStatus(statusText);
-      setLastRefreshTime(Date.now());
-      updateRefreshLabel();
-      const fid = selectedFeed();
-      await loadArticles(fid ?? undefined);
-      await loadFolders(); // refresh folder counts
+      // fetch_feeds now returns immediately; results arrive via fetch-complete event
+      await invoke("fetch_feeds");
     } catch (e) {
       setStatus(`Error: ${e}`);
+      setFeedBusy(false);
     }
-    setFeedBusy(false);
   };
 
   const searchArticles = async (query: string) => {
@@ -691,6 +783,25 @@ export default function App() {
     };
     document.addEventListener("click", handleClickOutside);
 
+    // Listen for async fetch completion events
+    let unlistenFetch: (() => void) | null = null;
+    listen<{ ok: boolean; results?: Array<{ feed_id: number; title: string; new_articles: number; error?: string }>; error?: string }>("fetch-complete", async (event) => {
+      const payload = event.payload;
+      if (payload.ok && payload.results) {
+        const results = payload.results;
+        const statusText = results.map(r => r.error ? `${r.title}: ${r.error}` : `${r.title}: ${r.new_articles} new`).join("; ");
+        setStatus(statusText);
+        setLastRefreshTime(Date.now());
+        updateRefreshLabel();
+        const fid = selectedFeed();
+        await loadArticles(fid ?? undefined);
+        await loadFolders();
+      } else {
+        setStatus(`Fetch error: ${payload.error || "Unknown error"}`);
+      }
+      setFeedBusy(false);
+    }).then(fn => { unlistenFetch = fn; });
+
     const autoRefreshInterval = setInterval(() => {
       fetchAll();
     }, 15 * 60 * 1000);
@@ -702,6 +813,7 @@ export default function App() {
     onCleanup(() => {
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("click", handleClickOutside);
+      if (unlistenFetch) unlistenFetch();
       clearInterval(autoRefreshInterval);
       clearInterval(labelUpdateInterval);
     });
@@ -745,6 +857,16 @@ export default function App() {
               <button onClick={fetchAll} aria-label="Refresh all feeds">
                 Refresh
               </button>
+              <button
+                onClick={() => {
+                  setManageMode(!manageMode());
+                  setSelectedFeedIds(new Set<number>());
+                }}
+                aria-label={manageMode() ? "Exit manage mode" : "Manage feeds"}
+                aria-pressed={manageMode()}
+              >
+                {manageMode() ? "Done" : "Manage"}
+              </button>
             </div>
           </div>
 
@@ -779,6 +901,87 @@ export default function App() {
                 <button onClick={importOpml} aria-label="Import feeds from OPML file">Import OPML</button>
                 <button onClick={exportOpml} aria-label="Export feeds as OPML file">Export OPML</button>
               </div>
+            </div>
+          </Show>
+
+          {/* New folder dialog */}
+          <Show when={showNewFolder()}>
+            <div class="feed-management" aria-label="Create folder">
+              <form
+                class="add-feed-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  createNewFolder(newFolderName(), pendingMoveFeedId() ?? undefined);
+                }}
+                aria-label="Create new folder"
+              >
+                <label for="new-folder-name" class="sr-only">Folder name</label>
+                <input
+                  id="new-folder-name"
+                  type="text"
+                  placeholder="Folder name, then Enter"
+                  value={newFolderName()}
+                  onInput={(e) => setNewFolderName(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setShowNewFolder(false);
+                      setNewFolderName("");
+                      setPendingMoveFeedId(null);
+                    }
+                  }}
+                  aria-label="Folder name"
+                />
+                <button type="submit" aria-label="Create folder">OK</button>
+                <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderName(""); setPendingMoveFeedId(null); }} aria-label="Cancel">
+                  Cancel
+                </button>
+              </form>
+            </div>
+          </Show>
+
+          {/* Manage mode: bulk select + move */}
+          <Show when={manageMode()}>
+            <div class="manage-bar" role="toolbar" aria-label="Bulk feed actions">
+              <span class="manage-count">{selectedFeedIds().size} selected</span>
+              <select
+                aria-label="Move selected feeds to folder"
+                value={bulkTargetFolder() ?? ""}
+                onChange={(e) => {
+                  const val = e.currentTarget.value;
+                  setBulkTargetFolder(val ? parseInt(val) : null);
+                }}
+              >
+                <option value="">Move to...</option>
+                <For each={manualFolders()}>
+                  {(f) => <option value={f.id ?? ""}>{f.name}</option>}
+                </For>
+                <option value="__uncategorize">Uncategorize</option>
+              </select>
+              <button
+                disabled={selectedFeedIds().size === 0}
+                onClick={() => {
+                  const target = bulkTargetFolder();
+                  const selectVal = (document.querySelector('.manage-bar select') as HTMLSelectElement)?.value;
+                  if (selectVal === "__uncategorize") {
+                    bulkMoveFeeds(null);
+                  } else if (target) {
+                    bulkMoveFeeds(target);
+                  }
+                }}
+                aria-label="Move selected feeds"
+              >
+                Move
+              </button>
+              <button
+                onClick={() => {
+                  setPendingMoveFeedId(null);
+                  setShowNewFolder(true);
+                  requestAnimationFrame(() => document.getElementById("new-folder-name")?.focus());
+                }}
+                aria-label="Create new folder"
+              >
+                + Folder
+              </button>
             </div>
           </Show>
 
@@ -820,35 +1023,71 @@ export default function App() {
               </span>
               <span class="feed-title">Smart Folders</span>
             </li>
-            <Show when={isSectionExpanded("smart-folders")}>
+            <li role="none">
+              <ul role="group" style={isSectionExpanded("smart-folders") ? {} : { display: "none" }}>
+                <For each={cognitiveFolders()}>
+                  {(folder) => (
+                    <li
+                      role="treeitem"
+                      class="feed-button tree-child"
+                      tabindex={-1}
+                      aria-selected={selectedFolder() === folder.name}
+                      aria-label={`${folder.name} smart folder, ${folder.article_count ?? 0} articles`}
+                      data-folder-name={folder.name}
+                      onClick={() => selectCognitiveFolder(folder.name)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          selectCognitiveFolder(folder.name);
+                        }
+                      }}
+                    >
+                      <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC1"}</span>
+                      <span class="feed-title">{folder.name}</span>
+                      <Show when={(folder.article_count ?? 0) > 0}>
+                        <span class="unread-badge" aria-hidden="true">{folder.article_count}</span>
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </li>
+
+            {/* Manual Folders section */}
+            <Show when={manualFolders().length > 0}>
+              <li
+                role="treeitem"
+                aria-expanded={isSectionExpanded("manual-folders")}
+                data-section="manual-folders"
+                class="section-header feed-button"
+                tabindex={-1}
+                onClick={() => toggleSection("manual-folders")}
+              >
+                <span class="section-toggle" aria-hidden="true">
+                  {isSectionExpanded("manual-folders") ? "\u25BE" : "\u25B8"}
+                </span>
+                <span class="feed-title">Folders</span>
+              </li>
               <li role="none">
-                <ul role="group">
-                  <For each={cognitiveFolders()}>
+                <ul role="group" style={isSectionExpanded("manual-folders") ? {} : { display: "none" }}>
+                  <For each={manualFolders()}>
                     {(folder) => (
                       <li
                         role="treeitem"
                         class="feed-button tree-child"
                         tabindex={-1}
-                        aria-selected={selectedFolder() === folder.name}
-                        aria-label={`${folder.name} smart folder, ${folder.article_count ?? 0} articles`}
-                        data-folder-name={folder.name}
-                        onClick={() => selectCognitiveFolder(folder.name)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            selectCognitiveFolder(folder.name);
-                          }
+                        aria-label={`${folder.name} folder`}
+                        data-folder-id={folder.id}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          if (folder.id) openContextMenu(e.clientX, e.clientY, "folder", folder.id);
                         }}
                       >
-                        <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC1"}</span>
+                        <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC2"}</span>
                         <span class="feed-title">{folder.name}</span>
-                        <Show when={(folder.article_count ?? 0) > 0}>
-                          <span class="unread-badge" aria-hidden="true">{folder.article_count}</span>
-                        </Show>
                       </li>
                     )}
                   </For>
-
                 </ul>
               </li>
             </Show>
@@ -867,47 +1106,61 @@ export default function App() {
               </span>
               <span class="feed-title">Feeds</span>
             </li>
-            <Show when={isSectionExpanded("feeds")}>
-              <li role="none">
-                <ul role="group">
-                  <For each={feeds()}>
-                    {(feed) => {
-                      const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
-                      return (
-                        <li
-                          id={`feed-${feed.id}`}
-                          role="treeitem"
-                          class="feed-button tree-child"
-                          tabindex={-1}
-                          aria-selected={selectedFeed() === feed.id}
-                          aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
-                          data-feed-id={feed.id}
-                          onClick={() => selectFeed(feed)}
-                          onContextMenu={(e) => {
+            <li role="none">
+              <ul role="group" style={isSectionExpanded("feeds") ? {} : { display: "none" }}>
+                <For each={feeds()}>
+                  {(feed) => {
+                    const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
+                    return (
+                      <li
+                        id={`feed-${feed.id}`}
+                        role="treeitem"
+                        class={`feed-button tree-child ${manageMode() && selectedFeedIds().has(feed.id) ? "manage-selected" : ""}`}
+                        tabindex={-1}
+                        aria-selected={manageMode() ? selectedFeedIds().has(feed.id) : selectedFeed() === feed.id}
+                        aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}${manageMode() ? (selectedFeedIds().has(feed.id) ? ", selected" : ", not selected") : ""}`}
+                        data-feed-id={feed.id}
+                        onClick={() => {
+                          if (manageMode()) {
+                            toggleFeedSelection(feed.id);
+                          } else {
+                            selectFeed(feed);
+                          }
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          openContextMenu(e.clientX, e.clientY, "feed", feed.id);
+                        }}
+                        onKeyDown={(e) => {
+                          if (manageMode() && (e.key === "Enter" || e.key === " ")) {
                             e.preventDefault();
-                            openContextMenu(e.clientX, e.clientY, "feed", feed.id);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Delete") {
-                              removeFeed(feed.id);
-                            }
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              selectFeed(feed);
-                            }
-                          }}
-                        >
-                          <span class="feed-title">{feed.title}</span>
-                          <Show when={feedUnread() > 0}>
-                            <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
-                          </Show>
-                        </li>
-                      );
-                    }}
-                  </For>
-                </ul>
-              </li>
-            </Show>
+                            toggleFeedSelection(feed.id);
+                            return;
+                          }
+                          if (e.key === "Delete") {
+                            removeFeed(feed.id);
+                          }
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            selectFeed(feed);
+                          }
+                        }}
+                      >
+                        <Show when={manageMode()}>
+                          <span class="manage-checkbox" aria-hidden="true">
+                            {selectedFeedIds().has(feed.id) ? "\u2611" : "\u2610"}
+                          </span>
+                        </Show>
+                        <span class="feed-title">{feed.title}</span>
+                        <Show when={feedUnread() > 0 && !manageMode()}>
+                          <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
+                        </Show>
+                      </li>
+                    );
+                  }}
+                </For>
+              </ul>
+            </li>
           </ul>
         </nav>
 
@@ -1024,12 +1277,22 @@ export default function App() {
                     </span>
                     <span id={titleId} class="article-title">{article.title}</span>
                     <span id={snippetId} class="sr-only">
-                      {article.summary ? article.summary.substring(0, 100) : ""}
+                      {article.tldr || (article.summary ? article.summary.substring(0, 100) : "")}
                     </span>
                   </article>
                 );
               }}
             </For>
+            <Show when={hasMore()}>
+              <button
+                class="load-more-btn"
+                onClick={loadMoreArticles}
+                disabled={feedBusy()}
+                aria-label="Load more articles"
+              >
+                {feedBusy() ? "Loading..." : "Load more articles"}
+              </button>
+            </Show>
           </div>
         </section>
 
@@ -1075,7 +1338,7 @@ export default function App() {
                 </header>
                 <div
                   class="article-content"
-                  innerHTML={fullText() || article().content || article().summary || "<p>No content available.</p>"}
+                  innerHTML={fullText() || article().full_content || article().content || article().summary || "<p>No content available.</p>"}
                 />
               </article>
             )}
