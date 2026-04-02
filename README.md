@@ -9,13 +9,13 @@ Lumen manages RSS feeds and exposes articles as structured JSON and clean markdo
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/xingan-chen/lumen/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/AllenChen-Xingan/lumen/master/scripts/install.ps1 | iex
 ```
 
 ### Build from source
 
 ```bash
-git clone https://github.com/xingan-chen/lumen.git
+git clone https://github.com/AllenChen-Xingan/lumen.git
 cd lumen
 cargo build --release -p lumen
 # Binary at target/release/lumen
