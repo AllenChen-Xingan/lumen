@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 
 // ── Data structs (local, no rss-core dependency) ──────────────────────────
 
@@ -12,6 +13,12 @@ pub struct Feed {
     pub site_url: Option<String>,
     pub description: Option<String>,
     pub added_at: String,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified_header: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -26,6 +33,10 @@ pub struct Article {
     pub is_read: bool,
     pub is_starred: bool,
     pub fetched_at: String,
+    pub tldr: Option<String>,
+    pub guid: Option<String>,
+    pub full_content: Option<String>,
+    pub tags: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -36,12 +47,14 @@ pub struct FeedResult {
     pub article_count: usize,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct FetchResult {
     pub feed_id: i64,
     pub title: String,
     pub new_articles: usize,
     pub error: Option<String>,
+    #[serde(default)]
+    pub not_modified: Option<bool>,
 }
 
 /// Fact-based smart view
@@ -128,16 +141,38 @@ fn remove_feed(id: i64) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn fetch_feeds() -> Result<Vec<FetchResult>, String> {
-    let result = cli(&["fetch"])?;
-    let results: Vec<FetchResult> = serde_json::from_value(result["results"].clone())
-        .map_err(|e| format!("Failed to parse fetch results: {}", e))?;
-    Ok(results)
+async fn fetch_feeds(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let _handle = std::thread::spawn(move || {
+        let result = cli(&["fetch"]);
+        match result {
+            Ok(ref val) => {
+                let results: Vec<FetchResult> = serde_json::from_value(val["results"].clone())
+                    .unwrap_or_default();
+                let _ = app.emit("fetch-complete", serde_json::json!({
+                    "ok": true,
+                    "results": results,
+                }));
+            }
+            Err(ref e) => {
+                let _ = app.emit("fetch-complete", serde_json::json!({
+                    "ok": false,
+                    "error": e.clone(),
+                }));
+            }
+        }
+        result
+    });
+    // Return immediately so UI doesn't freeze
+    Ok(serde_json::json!({"status": "fetching"}))
 }
 
 #[tauri::command]
-fn list_articles(feed_id: Option<i64>, unread_only: bool) -> Result<Vec<Article>, String> {
-    let mut args: Vec<&str> = vec!["articles", "--count", "9999"];
+fn list_articles(feed_id: Option<i64>, unread_only: bool, count: Option<usize>, offset: Option<usize>) -> Result<serde_json::Value, String> {
+    let page_size = count.unwrap_or(50);
+    let skip = offset.unwrap_or(0);
+    // Fetch enough articles from CLI to cover offset + page_size
+    let fetch_count = (skip + page_size + 1).to_string(); // +1 to detect hasMore
+    let mut args: Vec<&str> = vec!["articles", "--count", &fetch_count];
     let id_str;
     if let Some(id) = feed_id {
         id_str = id.to_string();
@@ -148,9 +183,17 @@ fn list_articles(feed_id: Option<i64>, unread_only: bool) -> Result<Vec<Article>
         args.push("--unread");
     }
     let result = cli(&args)?;
-    let articles: Vec<Article> = serde_json::from_value(result["articles"].clone())
+    let all_articles: Vec<Article> = serde_json::from_value(result["articles"].clone())
         .map_err(|e| format!("Failed to parse articles: {}", e))?;
-    Ok(articles)
+    let total_fetched = all_articles.len();
+    let page: Vec<&Article> = all_articles.iter().skip(skip).take(page_size).collect();
+    let has_more = total_fetched > skip + page_size;
+    Ok(serde_json::json!({
+        "articles": page,
+        "has_more": has_more,
+        "offset": skip,
+        "count": page.len(),
+    }))
 }
 
 #[tauri::command]
@@ -183,37 +226,39 @@ fn fetch_full_text(id: i64) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn import_opml(data: String) -> Result<Vec<String>, String> {
-    // Write OPML data to a temp file so the CLI can read it
-    let tmp_dir = std::env::temp_dir();
-    let tmp_path = tmp_dir.join(format!("rss-import-{}.opml", std::process::id()));
-    std::fs::write(&tmp_path, &data)
-        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+async fn import_opml(data: String) -> Result<Vec<String>, String> {
+    // Run CLI import in a background thread to avoid freezing the UI
+    let handle = std::thread::spawn(move || {
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join(format!("rss-import-{}.opml", std::process::id()));
+        std::fs::write(&tmp_path, &data)
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
 
-    let path_str = tmp_path.to_string_lossy().to_string();
-    let result = cli(&["import", &path_str]);
+        let path_str = tmp_path.to_string_lossy().to_string();
+        let result = cli(&["import", &path_str]);
 
-    // Clean up temp file regardless of outcome
-    let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(&tmp_path);
 
-    let result = result?;
+        let result = result?;
 
-    let mut status: Vec<String> = Vec::new();
-    if let Some(imported) = result["imported"].as_array() {
-        for item in imported {
-            if let Some(s) = item.as_str() {
-                status.push(s.to_string());
+        let mut status: Vec<String> = Vec::new();
+        if let Some(imported) = result["imported"].as_array() {
+            for item in imported {
+                if let Some(s) = item.as_str() {
+                    status.push(s.to_string());
+                }
             }
         }
-    }
-    if let Some(errors) = result["errors"].as_array() {
-        for item in errors {
-            if let Some(s) = item.as_str() {
-                status.push(s.to_string());
+        if let Some(errors) = result["errors"].as_array() {
+            for item in errors {
+                if let Some(s) = item.as_str() {
+                    status.push(s.to_string());
+                }
             }
         }
-    }
-    Ok(status)
+        Ok::<Vec<String>, String>(status)
+    });
+    handle.join().map_err(|_| "Import thread panicked".to_string())?
 }
 
 #[tauri::command]
