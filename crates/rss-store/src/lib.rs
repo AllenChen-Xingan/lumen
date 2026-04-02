@@ -347,35 +347,43 @@ impl Database {
     /// Search articles with a time filter. `since` is a duration string like "24h", "7d", "30d".
     /// When `order_by_date` is false, results are ranked by BM25 relevance (title weighted 10x).
     pub fn search_articles_since(&self, query: &str, since: &str, limit: usize, feed_id: Option<i64>, order_by_date: bool) -> Result<Vec<Article>, rusqlite::Error> {
-        let hours: i64 = if since.ends_with('d') {
-            since.trim_end_matches('d').parse::<i64>().unwrap_or(1) * 24
-        } else if since.ends_with('h') {
-            since.trim_end_matches('h').parse::<i64>().unwrap_or(24)
-        } else {
-            24 * 365 // default: effectively no filter
-        };
-        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let after = since_to_rfc3339(since);
+        self.search_articles_timerange(query, Some(&after), None, limit, feed_id, order_by_date)
+    }
 
+    /// Search articles within a time range. `after`/`before` are RFC3339 or "YYYY-MM-DD" strings.
+    /// Either can be None for an open-ended range.
+    pub fn search_articles_timerange(&self, query: &str, after: Option<&str>, before: Option<&str>, limit: usize, feed_id: Option<i64>, order_by_date: bool) -> Result<Vec<Article>, rusqlite::Error> {
         // Empty query: fall back to time-filtered listing on regular table
         if query.trim().is_empty() {
             let mut sql = String::from(
                 "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
-                 FROM articles WHERE (published_at >= ?1 OR published_at IS NULL)"
+                 FROM articles WHERE 1=1"
             );
-            if feed_id.is_some() {
-                sql.push_str(" AND feed_id = ?3");
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut idx = 1;
+            if let Some(a) = after {
+                sql.push_str(&format!(" AND (published_at >= ?{} OR published_at IS NULL)", idx));
+                params.push(Box::new(a.to_string()));
+                idx += 1;
             }
-            sql.push_str(" ORDER BY published_at DESC LIMIT ?2");
+            if let Some(b) = before {
+                sql.push_str(&format!(" AND published_at <= ?{}", idx));
+                params.push(Box::new(b.to_string()));
+                idx += 1;
+            }
+            if feed_id.is_some() {
+                sql.push_str(&format!(" AND feed_id = ?{}", idx));
+                params.push(Box::new(feed_id.unwrap()));
+                idx += 1;
+            }
+            let _ = idx;
+            sql.push_str(&format!(" ORDER BY published_at DESC LIMIT {}", limit));
             let mut stmt = self.conn.prepare(&sql)?;
-            let articles = if let Some(fid) = feed_id {
-                stmt.query_map(rusqlite::params![cutoff, limit as i64, fid], |row| {
-                    Self::row_to_article(row)
-                })?.collect::<Result<Vec<_>, _>>()?
-            } else {
-                stmt.query_map(rusqlite::params![cutoff, limit as i64], |row| {
-                    Self::row_to_article(row)
-                })?.collect::<Result<Vec<_>, _>>()?
-            };
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let articles = stmt.query_map(param_refs.as_slice(), |row| {
+                Self::row_to_article(row)
+            })?.collect::<Result<Vec<_>, _>>()?;
             return Ok(articles);
         }
 
@@ -389,23 +397,33 @@ impl Database {
             "SELECT a.id, a.feed_id, a.guid, a.title, a.url, a.content, a.summary, a.published_at, a.is_read, a.is_starred, a.fetched_at, a.tldr, a.full_content, a.tags
              FROM articles_fts fts
              JOIN articles a ON a.id = fts.rowid
-             WHERE articles_fts MATCH ?1
-               AND (a.published_at >= ?2 OR a.published_at IS NULL)"
+             WHERE articles_fts MATCH ?1"
         );
-        if feed_id.is_some() {
-            sql.push_str(" AND a.feed_id = ?4");
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        params.push(Box::new(fts_query));
+        let mut idx = 2;
+        if let Some(a) = after {
+            sql.push_str(&format!(" AND (a.published_at >= ?{} OR a.published_at IS NULL)", idx));
+            params.push(Box::new(a.to_string()));
+            idx += 1;
         }
-        sql.push_str(&format!(" ORDER BY {} LIMIT ?3", order_clause));
+        if let Some(b) = before {
+            sql.push_str(&format!(" AND a.published_at <= ?{}", idx));
+            params.push(Box::new(b.to_string()));
+            idx += 1;
+        }
+        if feed_id.is_some() {
+            sql.push_str(&format!(" AND a.feed_id = ?{}", idx));
+            params.push(Box::new(feed_id.unwrap()));
+            idx += 1;
+        }
+        let _ = idx;
+        sql.push_str(&format!(" ORDER BY {} LIMIT {}", order_clause, limit));
         let mut stmt = self.conn.prepare(&sql)?;
-        let articles = if let Some(fid) = feed_id {
-            stmt.query_map(rusqlite::params![fts_query, cutoff, limit as i64, fid], |row| {
-                Self::row_to_article(row)
-            })?.collect::<Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map(rusqlite::params![fts_query, cutoff, limit as i64], |row| {
-                Self::row_to_article(row)
-            })?.collect::<Result<Vec<_>, _>>()?
-        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let articles = stmt.query_map(param_refs.as_slice(), |row| {
+            Self::row_to_article(row)
+        })?.collect::<Result<Vec<_>, _>>()?;
         Ok(articles)
     }
 
@@ -552,6 +570,15 @@ impl Database {
         )?;
         match stmt.query_row([article_id], |row| row.get::<_, Option<String>>(0)) {
             Ok(url) => Ok(url),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn get_article_title(&self, article_id: i64) -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT title FROM articles WHERE id = ?1")?;
+        match stmt.query_row([article_id], |row| row.get::<_, String>(0)) {
+            Ok(t) => Ok(Some(t)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
@@ -1305,4 +1332,16 @@ fn prepare_fts_query(raw: &str) -> String {
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// Convert relative duration ("24h", "7d", "30d") to RFC3339 cutoff timestamp.
+fn since_to_rfc3339(since: &str) -> String {
+    let hours: i64 = if since.ends_with('d') {
+        since.trim_end_matches('d').parse::<i64>().unwrap_or(1) * 24
+    } else if since.ends_with('h') {
+        since.trim_end_matches('h').parse::<i64>().unwrap_or(24)
+    } else {
+        24 * 365
+    };
+    (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339()
 }

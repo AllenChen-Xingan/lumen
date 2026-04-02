@@ -67,9 +67,18 @@ enum Commands {
         /// Filter by feed ID
         #[arg(long)]
         feed: Option<i64>,
-        /// Time filter: "24h", "7d", "30d"
+        /// Relative time filter: "24h", "7d", "30d"
         #[arg(long)]
         since: Option<String>,
+        /// Absolute start date (inclusive): "2026-03-15" or RFC3339
+        #[arg(long)]
+        after: Option<String>,
+        /// Absolute end date (inclusive): "2026-03-20" or RFC3339
+        #[arg(long)]
+        before: Option<String>,
+        /// Exact single day: "2026-03-15" (shorthand for --after X --before X)
+        #[arg(long)]
+        on: Option<String>,
         /// Compact output (no content)
         #[arg(long)]
         compact: bool,
@@ -77,8 +86,14 @@ enum Commands {
         #[arg(long, default_value = "relevance")]
         sort: String,
     },
-    /// Fetch full-text content for an article (cached)
-    FetchFullText { id: i64 },
+    /// Fetch full-text content for article(s). Accepts comma-separated IDs or reads from stdin.
+    FetchFullText {
+        /// Article ID(s), comma-separated for batch. Omit to read from stdin (pipe-friendly).
+        ids: Option<String>,
+        /// Output as markdown file(s) instead of HTML in JSON — returns file path(s)
+        #[arg(long)]
+        markdown: bool,
+    },
     /// Internal: annotate articles with fact-based features (length, has_code, has_steps, etc)
     #[command(name = "_annotate", hide = true)]
     Annotate {
@@ -230,6 +245,17 @@ fn describe_commands() -> Value {
     json!({
         "name": "rss",
         "description": "Agent-native RSS reader CLI — all output is JSON",
+        "compact_schema": {
+            "id": "article ID (integer)",
+            "t": "title",
+            "src": "feed name",
+            "tldr": "first sentence of content (auto-generated)",
+            "tags": "comma-separated fact-based tags: long, short, medium, structured, has_code, has_steps, has_images, has_links, has_references, link_rich",
+            "wc": "word count of content",
+            "r": "is_read (0=unread, 1=read)",
+            "s": "is_starred (0=no, 1=yes)",
+            "note": "use 'rss read <id>' or 'rss fetch-full-text <id>' to get details — compact omits url/content to save tokens"
+        },
         "commands": [
             {
                 "name": "add",
@@ -308,16 +334,20 @@ fn describe_commands() -> Value {
                     {"name": "query", "type": "string", "required": true, "description": "Search query (plain words, or FTS5 syntax: AND/OR/NOT, \"phrase\", prefix*)"},
                     {"name": "--count", "type": "integer", "required": false, "description": "Max results (default 30)"},
                     {"name": "--feed", "type": "integer", "required": false, "description": "Filter by feed ID"},
-                    {"name": "--since", "type": "string", "required": false, "description": "Time filter: 24h, 7d, 30d"},
+                    {"name": "--since", "type": "string", "required": false, "description": "Relative time filter: 24h, 7d, 30d"},
+                    {"name": "--after", "type": "string", "required": false, "description": "Absolute start date (inclusive): 2026-03-15 or RFC3339"},
+                    {"name": "--before", "type": "string", "required": false, "description": "Absolute end date (inclusive): 2026-03-20 or RFC3339"},
+                    {"name": "--on", "type": "string", "required": false, "description": "Single day shorthand: 2026-03-15 (equals --after X --before X)"},
                     {"name": "--compact", "type": "boolean", "required": false, "description": "Agent-friendly compact output"},
                     {"name": "--sort", "type": "string", "required": false, "description": "Sort: 'relevance' (BM25, default) or 'date' (newest first)"}
                 ]
             },
             {
                 "name": "fetch-full-text",
-                "description": "Fetch and cache full-text content for an article",
+                "description": "Fetch and cache full-text content. Supports comma-separated IDs for batch (e.g. 401,402,403). Use --markdown to write clean markdown files for agent processing.",
                 "args": [
-                    {"name": "id", "type": "integer", "required": true, "description": "Article ID"}
+                    {"name": "ids", "type": "string", "required": true, "description": "Article ID(s), comma-separated for batch (e.g. 401 or 401,402,403)"},
+                    {"name": "--markdown", "type": "boolean", "required": false, "description": "Write markdown to temp file, return file path instead of HTML in JSON"}
                 ]
             },
             {
@@ -446,19 +476,85 @@ fn extract_first_sentence(text: &str) -> String {
     }
 }
 
-/// Build compact article representation for agent scanning
+/// Fetch full text for a single article. Returns HTML string or error message.
+fn fetch_full_text_single(db: &Database, id: i64) -> Result<String, String> {
+    // Check cache first
+    match db.get_full_content(id) {
+        Ok(Some(html)) => return Ok(html),
+        Ok(None) => { /* cache miss — proceed to extract */ }
+        Err(e) => return Err(format!("DB error: {}", e)),
+    }
+
+    // Get article URL
+    let url = match db.get_article_url(id) {
+        Ok(Some(u)) => u,
+        Ok(None) => return Err(format!("Article {} not found or has no URL", id)),
+        Err(e) => return Err(format!("{}", e)),
+    };
+
+    // Extract
+    match rss_extract::extract_full_text(&url) {
+        Ok(content) => {
+            db.set_full_content(id, &content.html).ok();
+            Ok(content.html)
+        }
+        Err(e) => Err(format!("Extraction failed for {}: {}", id, e)),
+    }
+}
+
+/// Convert HTML to markdown and write to a temp file. Returns JSON with path and metadata.
+fn write_markdown_file(id: i64, html: &str, db: &Database) -> Result<Value, Box<dyn std::error::Error>> {
+    let md = rss_extract::html_to_markdown(html);
+    let wc = md.split_whitespace().count();
+
+    let dir = std::env::temp_dir().join("rss-articles");
+    std::fs::create_dir_all(&dir)?;
+
+    // Include article title in filename for agent discoverability
+    let raw_slug: String = db.get_article_title(id)
+        .unwrap_or(None)
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+        .take(40)
+        .collect();
+    let title_slug = raw_slug.trim().replace(' ', "-").to_lowercase();
+    let filename = if title_slug.is_empty() {
+        format!("{}.md", id)
+    } else {
+        format!("{}_{}.md", id, title_slug)
+    };
+
+    let path = dir.join(&filename);
+    std::fs::write(&path, &md)?;
+
+    Ok(json!({
+        "id": id,
+        "path": path.to_string_lossy(),
+        "wc": wc,
+    }))
+}
+
+/// Build compact article representation for agent scanning.
+/// Short keys to minimize tokens. Schema described in describe_commands().
 fn compact_article(a: &rss_core::Article, db: &Database) -> Value {
     let feed_title = db.get_feed_title(a.feed_id).ok().flatten().unwrap_or_default();
     let tags: Vec<String> = db.get_article_entities(a.id).unwrap_or_default();
     let tags_str = tags.into_iter().take(5).collect::<Vec<_>>().join(",");
+    let content = a.full_content.as_deref()
+        .or(a.content.as_deref())
+        .or(a.summary.as_deref())
+        .unwrap_or("");
+    let wc = content.split_whitespace().count();
     json!({
         "id": a.id,
-        "title": a.title,
-        "source": feed_title,
-        "published_at": a.published_at.map(|d| d.to_rfc3339()),
+        "t": a.title,
+        "src": feed_title,
         "tldr": a.tldr,
         "tags": tags_str,
-        "url": a.url,
+        "wc": wc,
+        "r": if a.is_read { 1 } else { 0 },
+        "s": if a.is_starred { 1 } else { 0 },
     })
 }
 
@@ -970,10 +1066,41 @@ fn main() -> ExitCode {
         // ---------------------------------------------------------------
         // SEARCH
         // ---------------------------------------------------------------
-        Commands::Search { query, count, feed, since, compact, sort } => {
+        Commands::Search { query, count, feed, since, after, before, on, compact, sort } => {
             let order_by_date = sort == "date";
-            let search_result = if let Some(ref since_str) = since {
-                db.search_articles_since(&query, since_str, count, feed, order_by_date)
+            // --on expands to --after/--before for that day
+            let (after, before) = if let Some(ref day) = on {
+                (after.or_else(|| Some(day.clone())), before.or_else(|| Some(day.clone())))
+            } else {
+                (after, before)
+            };
+            // --since (relative) converts to --after; explicit --after/--before take priority
+            let effective_after = after.or_else(|| since.as_ref().map(|s| {
+                let hours: i64 = if s.ends_with('d') {
+                    s.trim_end_matches('d').parse::<i64>().unwrap_or(1) * 24
+                } else if s.ends_with('h') {
+                    s.trim_end_matches('h').parse::<i64>().unwrap_or(24)
+                } else { 24 * 365 };
+                (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339()
+            }));
+            // Normalize "YYYY-MM-DD" to start/end of day (use +00:00 to match DB format)
+            let effective_after = effective_after.map(|a| {
+                if a.len() == 10 && !a.contains('T') {
+                    format!("{}T00:00:00+00:00", a)
+                } else { a }
+            });
+            let effective_before = before.map(|b| {
+                if b.len() == 10 && !b.contains('T') {
+                    format!("{}T23:59:59+00:00", b)
+                } else { b }
+            });
+            let search_result = if effective_after.is_some() || effective_before.is_some() {
+                db.search_articles_timerange(
+                    &query,
+                    effective_after.as_deref(),
+                    effective_before.as_deref(),
+                    count, feed, order_by_date,
+                )
             } else {
                 db.search_articles(&query, feed, order_by_date)
             };
@@ -1030,54 +1157,82 @@ fn main() -> ExitCode {
         }
 
         // ---------------------------------------------------------------
-        // FETCH-FULL-TEXT
+        // FETCH-FULL-TEXT (single or batch, optional --markdown)
         // ---------------------------------------------------------------
-        Commands::FetchFullText { id } => {
-            // Check cache first
-            match db.get_full_content(id) {
-                Ok(Some(html)) => {
-                    return success("fetch-full-text", json!({
-                        "article_id": id,
-                        "html": html,
-                        "cached": true,
-                    }), vec![
-                        action(&format!("rss read {}", id), "Read article metadata", json!({"id": {"value": id}})),
-                        action(&format!("rss star {}", id), "Star this article", json!({"id": {"value": id}})),
-                    ]);
+        Commands::FetchFullText { ids, markdown } => {
+            // Read IDs from argument or stdin
+            let raw_ids = match ids {
+                Some(s) => s,
+                None => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).ok();
+                    buf
                 }
-                Ok(None) => { /* cache miss — proceed to extract */ }
-                Err(e) => {
-                    return error("fetch-full-text", &format!("DB error: {}", e), "Check article ID with `rss articles`");
-                }
-            }
-
-            // Get article URL
-            let url = match db.get_article_url(id) {
-                Ok(Some(u)) => u,
-                Ok(None) => return error("fetch-full-text", &format!("Article {} not found or has no URL", id), "Use `rss articles` to find valid IDs"),
-                Err(e) => return error("fetch-full-text", &format!("{}", e), "Check article ID"),
             };
+            let id_list: Vec<i64> = raw_ids
+                .split(|c: char| c == ',' || c == '\n' || c.is_whitespace())
+                .filter_map(|s| s.trim().parse::<i64>().ok())
+                .collect();
 
-            // Extract
-            match rss_extract::extract_full_text(&url) {
-                Ok(content) => {
-                    // Cache it
-                    db.set_full_content(id, &content.html).ok();
-
-                    let source_str = format!("{:?}", content.source);
-                    success("fetch-full-text", json!({
-                        "article_id": id,
-                        "html": content.html,
-                        "text_len": content.text_len,
-                        "source": source_str,
-                        "cached": false,
-                    }), vec![
-                        action(&format!("rss read {}", id), "Read article metadata", json!({"id": {"value": id}})),
-                        action(&format!("rss star {}", id), "Star this article", json!({"id": {"value": id}})),
-                    ])
-                }
-                Err(e) => error("fetch-full-text", &format!("Extraction failed: {}", e), &format!("Try opening {} in a browser", url)),
+            if id_list.is_empty() {
+                return error("fetch-full-text", "No valid article IDs provided", "Pass IDs as argument (401,402) or pipe via stdin");
             }
+
+            // Single ID — original behavior (returns html or markdown file)
+            if id_list.len() == 1 {
+                let id = id_list[0];
+                let html = match fetch_full_text_single(&db, id) {
+                    Ok(h) => h,
+                    Err(e) => return error("fetch-full-text", &e, "Check article ID with `rss articles`"),
+                };
+
+                if markdown {
+                    match write_markdown_file(id, &html, &db) {
+                        Ok(result) => return success("fetch-full-text", result, vec![]),
+                        Err(e) => return error("fetch-full-text", &format!("{}", e), "Check temp directory permissions"),
+                    }
+                }
+
+                return success("fetch-full-text", json!({
+                    "article_id": id,
+                    "html": html,
+                    "cached": true,
+                }), vec![
+                    action(&format!("rss read {}", id), "Read article metadata", json!({"id": {"value": id}})),
+                    action(&format!("rss star {}", id), "Star this article", json!({"id": {"value": id}})),
+                ]);
+            }
+
+            // Batch — always returns array
+            let mut items: Vec<Value> = Vec::new();
+            let mut errors: Vec<Value> = Vec::new();
+
+            for id in &id_list {
+                match fetch_full_text_single(&db, *id) {
+                    Ok(html) => {
+                        if markdown {
+                            match write_markdown_file(*id, &html, &db) {
+                                Ok(result) => items.push(result),
+                                Err(e) => errors.push(json!({"id": id, "error": format!("{}", e)})),
+                            }
+                        } else {
+                            items.push(json!({"article_id": id, "html": html}));
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(json!({"id": id, "error": e}));
+                    }
+                }
+            }
+
+            let mut result = json!({
+                "items": items,
+                "count": items.len(),
+            });
+            if !errors.is_empty() {
+                result["errors"] = json!(errors);
+            }
+            success("fetch-full-text", result, vec![])
         }
 
         // ---------------------------------------------------------------
