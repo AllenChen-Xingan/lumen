@@ -12,6 +12,8 @@ pub fn parse_feed(url: &str, data: &[u8]) -> Result<(Feed, Vec<Article>), Box<dy
         site_url: parsed.links.first().map(|l| l.href.clone()),
         description: parsed.description.map(|d| d.content),
         added_at: Utc::now(),
+        etag: None,
+        last_modified_header: None,
     };
 
     let articles: Vec<Article> = parsed.entries.into_iter().map(|entry| {

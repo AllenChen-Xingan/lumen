@@ -9,6 +9,10 @@ pub struct Feed {
     pub site_url: Option<String>,
     pub description: Option<String>,
     pub added_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified_header: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
