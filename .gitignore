@@ -2,5 +2,16 @@
 node_modules/
 dist/
 *.db
+
+# Environment
 .env
+
+# Claude Code local state
 .claude/worktrees/
+.claude/settings.local.json
+.claude/skills/design-ui-design/
+
+# Internal dev notes (not part of the product)
+docs/refernece.txt
+SPRINT_PLAN.md
+WORKING_LOG.md
