@@ -67,11 +67,13 @@ export default function App() {
   const [manageMode, setManageMode] = createSignal(false);
   const [selectedFeedIds, setSelectedFeedIds] = createSignal<Set<number>>(new Set());
   const [bulkTargetFolder, setBulkTargetFolder] = createSignal<number | null>(null);
+  const [sortOrder, setSortOrder] = createSignal<"newest" | "oldest">("newest");
 
   const [expandedSections, setExpandedSections] = createSignal<Record<string, boolean>>({
     "smart-folders": true,
     "manual-folders": true,
     "feeds": true,
+    // Per-folder keys like "folder-5" are added dynamically
   });
   const [contextMenu, setContextMenu] = createSignal<{
     x: number; y: number;
@@ -89,14 +91,64 @@ export default function App() {
 
   const unreadCount = () => articles().filter((a) => !a.is_read).length;
 
+  const formatDate = (dateStr: string | null): string => {
+    if (!dateStr) return "";
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return "";
+    const now = Date.now();
+    const diffMs = now - d.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return "just now";
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHrs = Math.floor(diffMin / 60);
+    if (diffHrs < 24) return `${diffHrs}h ago`;
+    const diffDays = Math.floor(diffHrs / 24);
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return d.toLocaleDateString();
+  };
+
   const cognitiveFolders = () => folders().filter(f => f.type === "smart_view");
   const manualFolders = () => folders().filter(f => f.type === "manual");
+  const uncategorizedFeeds = () => feeds().filter(f => f.folder_id === null);
+
+  const sortedArticles = () => {
+    const list = [...articles()];
+    if (sortOrder() === "oldest") {
+      list.sort((a, b) => {
+        const ta = a.published_at || a.fetched_at;
+        const tb = b.published_at || b.fetched_at;
+        return ta.localeCompare(tb);
+      });
+    } else {
+      list.sort((a, b) => {
+        const ta = a.published_at || a.fetched_at;
+        const tb = b.published_at || b.fetched_at;
+        return tb.localeCompare(ta);
+      });
+    }
+    return list;
+  };
+  const feedsInFolder = (folderId: number) => feeds().filter(f => f.folder_id === folderId);
 
   const toggleSection = (section: string) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
   };
 
   const isSectionExpanded = (section: string) => expandedSections()[section] !== false;
+
+  // Find the section header treeitem that owns a role="group" container.
+  // DOM structure: <li role="treeitem" aria-expanded> followed by <li role="none"><ul role="group">
+  // So the header is the previousElementSibling of the role="none" wrapper.
+  const getSectionHeader = (group: HTMLElement): HTMLElement | null => {
+    const wrapper = group.parentElement;
+    if (wrapper?.getAttribute("role") === "none") {
+      const sibling = wrapper.previousElementSibling as HTMLElement | null;
+      if (sibling?.getAttribute("role") === "treeitem" && sibling.hasAttribute("aria-expanded")) {
+        return sibling;
+      }
+    }
+    return null;
+  };
 
   // Get all visible treeitem elements for keyboard navigation
   const getVisibleTreeItems = (): HTMLElement[] => {
@@ -105,8 +157,8 @@ export default function App() {
       let parent = el.parentElement;
       while (parent && parent !== feedListRef) {
         if (parent.getAttribute("role") === "group") {
-          const parentItem = parent.parentElement;
-          if (parentItem?.getAttribute("aria-expanded") === "false") {
+          const header = getSectionHeader(parent);
+          if (header?.getAttribute("aria-expanded") === "false") {
             return false;
           }
         }
@@ -138,7 +190,13 @@ export default function App() {
       } else if (pane === "articles") {
         focusArticleItem(selectedArticleIndex());
       } else if (pane === "reader" && readerRef) {
-        readerRef.focus();
+        const heading = readerRef.querySelector('h3');
+        if (heading) {
+          (heading as HTMLElement).tabIndex = -1;
+          (heading as HTMLElement).focus();
+        } else {
+          readerRef.focus();
+        }
       }
     });
   };
@@ -547,7 +605,16 @@ export default function App() {
       fetchedArticleIds.add(article.id);
       fetchFullText(article.id);
     }
-    requestAnimationFrame(() => readerRef?.focus());
+    requestAnimationFrame(() => {
+      // Focus the article heading so NVDA enters browse mode for reading
+      const heading = readerRef?.querySelector('h3');
+      if (heading) {
+        (heading as HTMLElement).tabIndex = -1;
+        (heading as HTMLElement).focus();
+      } else {
+        readerRef?.focus();
+      }
+    });
   };
 
   const toggleStar = async (id: number) => {
@@ -648,7 +715,17 @@ export default function App() {
     }
 
     if (pane === "feeds") {
-      if (e.key === "ArrowDown") { e.preventDefault(); navigateFeed(1); }
+      if (e.key === "Home") {
+        e.preventDefault();
+        const items = getVisibleTreeItems();
+        if (items.length > 0) { setSelectedFeedIndex(0); items[0].focus(); }
+      }
+      else if (e.key === "End") {
+        e.preventDefault();
+        const items = getVisibleTreeItems();
+        if (items.length > 0) { const last = items.length - 1; setSelectedFeedIndex(last); items[last].focus(); }
+      }
+      else if (e.key === "ArrowDown") { e.preventDefault(); navigateFeed(1); }
       else if (e.key === "ArrowUp") { e.preventDefault(); navigateFeed(-1); }
       else if (e.key === "ArrowRight") {
         e.preventDefault();
@@ -666,18 +743,20 @@ export default function App() {
         const el = document.activeElement as HTMLElement;
         const expanded = el?.getAttribute("aria-expanded");
         if (expanded === "true") {
+          // On expanded parent: collapse it
           const sectionId = el?.dataset.section;
           if (sectionId) toggleSection(sectionId);
         } else {
+          // On child or collapsed parent: move focus to parent section header
           const group = el?.closest('[role="group"]');
           if (group) {
-            const parentItem = group.parentElement as HTMLElement;
-            if (parentItem?.getAttribute("role") === "treeitem") {
+            const header = getSectionHeader(group as HTMLElement);
+            if (header) {
               const items = getVisibleTreeItems();
-              const idx = items.indexOf(parentItem);
+              const idx = items.indexOf(header);
               if (idx >= 0) {
                 setSelectedFeedIndex(idx);
-                parentItem.focus();
+                header.focus();
               }
             }
           }
@@ -744,14 +823,15 @@ export default function App() {
       else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); navigateArticle(-1); }
       else if (e.key === "PageDown") { e.preventDefault(); navigateArticle(10); }
       else if (e.key === "PageUp") { e.preventDefault(); navigateArticle(-10); }
-      else if (e.key === "Home" && e.ctrlKey) {
+      else if (e.key === "Home") {
         e.preventDefault();
-        const searchInput = document.querySelector<HTMLElement>('.search-input, #search-input');
-        searchInput?.focus();
+        setSelectedArticleIndex(0);
+        focusArticleItem(0);
       }
-      else if (e.key === "End" && e.ctrlKey) {
+      else if (e.key === "End") {
         e.preventDefault();
-        readerRef?.focus();
+        const last = sortedArticles().length - 1;
+        if (last >= 0) { setSelectedArticleIndex(last); focusArticleItem(last); }
       }
       else if (e.key === "Enter") {
         e.preventDefault();
@@ -996,6 +1076,7 @@ export default function App() {
             <li
               id="feed-all"
               role="treeitem"
+              aria-level={1}
               class="all-articles-item feed-button"
               tabindex={selectedFeedIndex() === 0 ? 0 : -1}
               aria-selected={selectedFeed() === null && selectedFolder() === null}
@@ -1013,6 +1094,7 @@ export default function App() {
             {/* Smart Folders section (4 fixed cognitive folders) */}
             <li
               role="treeitem"
+              aria-level={1}
               aria-expanded={isSectionExpanded("smart-folders")}
               data-section="smart-folders"
               class="section-header feed-button"
@@ -1030,6 +1112,7 @@ export default function App() {
                   {(folder) => (
                     <li
                       role="treeitem"
+                      aria-level={2}
                       class="feed-button tree-child"
                       tabindex={-1}
                       aria-selected={selectedFolder() === folder.name}
@@ -1054,48 +1137,102 @@ export default function App() {
               </ul>
             </li>
 
-            {/* Manual Folders section */}
-            <Show when={manualFolders().length > 0}>
-              <li
-                role="treeitem"
-                aria-expanded={isSectionExpanded("manual-folders")}
-                data-section="manual-folders"
-                class="section-header feed-button"
-                tabindex={-1}
-                onClick={() => toggleSection("manual-folders")}
-              >
-                <span class="section-toggle" aria-hidden="true">
-                  {isSectionExpanded("manual-folders") ? "\u25BE" : "\u25B8"}
-                </span>
-                <span class="feed-title">Folders</span>
-              </li>
-              <li role="none">
-                <ul role="group" style={isSectionExpanded("manual-folders") ? {} : { display: "none" }}>
-                  <For each={manualFolders()}>
-                    {(folder) => (
-                      <li
-                        role="treeitem"
-                        class="feed-button tree-child"
-                        tabindex={-1}
-                        aria-label={`${folder.name} folder`}
-                        data-folder-id={folder.id}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          if (folder.id) openContextMenu(e.clientX, e.clientY, "folder", folder.id);
-                        }}
-                      >
-                        <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC2"}</span>
-                        <span class="feed-title">{folder.name}</span>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </li>
-            </Show>
+            {/* Manual Folders — each folder expands to show its feeds */}
+            <For each={manualFolders()}>
+              {(folder) => {
+                const folderId = folder.id!;
+                const sectionKey = `folder-${folderId}`;
+                const folderFeeds = () => feedsInFolder(folderId);
+                return (
+                  <>
+                    <li
+                      role="treeitem"
+                      aria-level={1}
+                      aria-expanded={isSectionExpanded(sectionKey)}
+                      data-section={sectionKey}
+                      data-folder-id={folderId}
+                      class="section-header feed-button"
+                      tabindex={-1}
+                      onClick={() => toggleSection(sectionKey)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        openContextMenu(e.clientX, e.clientY, "folder", folderId);
+                      }}
+                    >
+                      <span class="section-toggle" aria-hidden="true">
+                        {isSectionExpanded(sectionKey) ? "\u25BE" : "\u25B8"}
+                      </span>
+                      <span class="folder-icon" aria-hidden="true">{"\uD83D\uDCC2"}</span>
+                      <span class="feed-title">{folder.name}</span>
+                      <Show when={folderFeeds().length > 0}>
+                        <span class="unread-badge" aria-hidden="true">{folderFeeds().length}</span>
+                      </Show>
+                    </li>
+                    <li role="none">
+                      <ul role="group" style={isSectionExpanded(sectionKey) ? {} : { display: "none" }}>
+                        <For each={folderFeeds()}>
+                          {(feed) => {
+                            const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
+                            return (
+                              <li
+                                id={`feed-${feed.id}`}
+                                role="treeitem"
+                                aria-level={2}
+                                class={`feed-button tree-child ${manageMode() && selectedFeedIds().has(feed.id) ? "manage-selected" : ""}`}
+                                tabindex={-1}
+                                aria-selected={manageMode() ? selectedFeedIds().has(feed.id) : selectedFeed() === feed.id}
+                                aria-label={`${feed.title}${feedUnread() > 0 ? `, ${feedUnread()} unread` : ""}`}
+                                data-feed-id={feed.id}
+                                onClick={() => {
+                                  if (manageMode()) {
+                                    toggleFeedSelection(feed.id);
+                                  } else {
+                                    selectFeed(feed);
+                                  }
+                                }}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  openContextMenu(e.clientX, e.clientY, "feed", feed.id);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (manageMode() && (e.key === "Enter" || e.key === " ")) {
+                                    e.preventDefault();
+                                    toggleFeedSelection(feed.id);
+                                    return;
+                                  }
+                                  if (e.key === "Delete") {
+                                    removeFeed(feed.id);
+                                  }
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    selectFeed(feed);
+                                  }
+                                }}
+                              >
+                                <Show when={manageMode()}>
+                                  <span class="manage-checkbox" aria-hidden="true">
+                                    {selectedFeedIds().has(feed.id) ? "\u2611" : "\u2610"}
+                                  </span>
+                                </Show>
+                                <span class="feed-title">{feed.title}</span>
+                                <Show when={feedUnread() > 0 && !manageMode()}>
+                                  <span class="unread-badge" aria-hidden="true">{feedUnread()}</span>
+                                </Show>
+                              </li>
+                            );
+                          }}
+                        </For>
+                      </ul>
+                    </li>
+                  </>
+                );
+              }}
+            </For>
 
             {/* Feeds section */}
             <li
               role="treeitem"
+              aria-level={1}
               aria-expanded={isSectionExpanded("feeds")}
               data-section="feeds"
               class="section-header feed-button"
@@ -1109,13 +1246,14 @@ export default function App() {
             </li>
             <li role="none">
               <ul role="group" style={isSectionExpanded("feeds") ? {} : { display: "none" }}>
-                <For each={feeds()}>
+                <For each={uncategorizedFeeds()}>
                   {(feed) => {
                     const feedUnread = () => articles().filter((a) => a.feed_id === feed.id && !a.is_read).length;
                     return (
                       <li
                         id={`feed-${feed.id}`}
                         role="treeitem"
+                        aria-level={2}
                         class={`feed-button tree-child ${manageMode() && selectedFeedIds().has(feed.id) ? "manage-selected" : ""}`}
                         tabindex={-1}
                         aria-selected={manageMode() ? selectedFeedIds().has(feed.id) : selectedFeed() === feed.id}
@@ -1206,6 +1344,14 @@ export default function App() {
         >
           <div class="pane-header">
             <h2>Articles</h2>
+            <div class="pane-actions">
+              <button
+                onClick={() => setSortOrder(sortOrder() === "newest" ? "oldest" : "newest")}
+                aria-label={`Sort by ${sortOrder() === "newest" ? "oldest first" : "newest first"}`}
+              >
+                {sortOrder() === "newest" ? "\u2193 New" : "\u2191 Old"}
+              </button>
+            </div>
           </div>
           <div role="search" aria-label="Search articles" class="search-bar">
             <label for="search-input" class="sr-only">Search articles</label>
@@ -1238,18 +1384,20 @@ export default function App() {
                 <p>No articles to display</p>
               </div>
             </Show>
-            <For each={articles()}>
+            <For each={sortedArticles()}>
               {(article, index) => {
                 const titleId = `article-title-${article.id}`;
                 const snippetId = `article-snippet-${article.id}`;
+                const dateLabel = () => formatDate(article.published_at || article.fetched_at);
+                const readStatus = article.is_read ? "read" : "unread";
+                const ariaDesc = `${readStatus}${article.is_starred ? ", starred" : ""}${dateLabel() ? `, ${dateLabel()}` : ""}`;
                 return (
                   <article
                     id={`article-${article.id}`}
                     role="article"
                     aria-posinset={index() + 1}
-                    aria-setsize={articles().length}
-                    aria-labelledby={titleId}
-                    aria-describedby={snippetId}
+                    aria-setsize={sortedArticles().length}
+                    aria-label={`${article.title}, ${ariaDesc}`}
                     tabindex={selectedArticleIndex() === index() ? 0 : -1}
                     class={`article-item ${article.is_read ? "read" : "unread"}`}
                     onClick={() => selectArticle(article, index())}
@@ -1271,6 +1419,9 @@ export default function App() {
                       {article.is_starred ? "\u2605" : ""}
                     </span>
                     <span id={titleId} class="article-title">{article.title}</span>
+                    <Show when={dateLabel()}>
+                      <span class="article-date" aria-hidden="true">{dateLabel()}</span>
+                    </Show>
                     <Show when={article.summary}>
                       <span id={snippetId} class="article-summary">
                         {article.summary!.length > 120 ? article.summary!.substring(0, 117) + "..." : article.summary}
@@ -1333,10 +1484,23 @@ export default function App() {
                     </Show>
                   </div>
                 </header>
-                <div
-                  class="article-content"
-                  innerHTML={fullText() || article().full_content || article().content || article().summary || "<p>No content available.</p>"}
-                />
+                <Show when={fullTextLoading()}>
+                  <p class="article-content" style={{"color": "var(--read)"}}>Loading full text...</p>
+                </Show>
+                <Show when={!fullTextLoading()}>
+                  <div
+                    class="article-content"
+                    innerHTML={fullText() || article().full_content || article().content || article().summary || ""}
+                  />
+                  <Show when={!(fullText() || article().full_content || article().content || article().summary)}>
+                    <div class="article-content" style={{"color": "var(--read)"}}>
+                      <p>No content in feed.{article().url ? "" : " No article URL available."}</p>
+                      <Show when={article().url}>
+                        <p>This may be a paywalled or members-only article. <a href={article().url!} target="_blank" rel="noopener noreferrer">Open in browser</a> to read.</p>
+                      </Show>
+                    </div>
+                  </Show>
+                </Show>
               </article>
             )}
           </Show>

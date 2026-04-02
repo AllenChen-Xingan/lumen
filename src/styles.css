@@ -239,6 +239,13 @@ ul[role="group"] {
   border-bottom: 1px solid var(--border);
 }
 
+.article-date {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--read);
+  white-space: nowrap;
+}
+
 .article-summary {
   width: 100%;
   font-size: 0.8rem;
