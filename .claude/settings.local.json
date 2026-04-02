@@ -31,7 +31,10 @@
       "Bash(python -c ':*)",
       "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
       "Read(//c/Users/tecmu/.claude/skills/search-exa/**)",
-      "Bash(bash ./scripts/search.sh '{\"query\": \"ARIA feed role implementation example NVDA screen reader article list navigation\", \"type\": \"neural\", \"numResults\": 5, \"contents\": {\"highlights\": true, \"summary\": true}}')"
+      "Bash(bash ./scripts/search.sh '{\"query\": \"ARIA feed role implementation example NVDA screen reader article list navigation\", \"type\": \"neural\", \"numResults\": 5, \"contents\": {\"highlights\": true, \"summary\": true}}')",
+      "Bash(where agent-browser:*)",
+      "Bash(sqlite3 rss.db \"SELECT id, title, tags, word_count, code_block_count FROM articles WHERE tags LIKE '%has_code%' OR tags LIKE '%has_steps%' ORDER BY id;\")",
+      "Bash(python3 -c ':*)"
     ]
   }
 }
