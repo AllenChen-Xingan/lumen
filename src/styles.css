@@ -35,7 +35,7 @@
 }
 
 body {
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   background: var(--bg);
   color: var(--fg);
   line-height: 1.5;
@@ -233,9 +233,21 @@ ul[role="group"] {
   padding: 8px 12px;
   cursor: pointer;
   display: flex;
-  gap: 6px;
-  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: baseline;
   border-bottom: 1px solid var(--border);
+}
+
+.article-summary {
+  width: 100%;
+  font-size: 0.8rem;
+  color: var(--read);
+  line-height: 1.4;
+  padding-left: 1.2em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .article-item:hover {
