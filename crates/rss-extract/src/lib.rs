@@ -1,5 +1,10 @@
 use std::process::Command;
 
+/// Convert HTML to clean markdown suitable for agent consumption.
+pub fn html_to_markdown(html: &str) -> String {
+    html2md::parse_html(html)
+}
+
 const NORMAL_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const GOOGLEBOT_UA: &str = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 
