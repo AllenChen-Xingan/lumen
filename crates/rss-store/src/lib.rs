@@ -364,12 +364,12 @@ impl Database {
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             let mut idx = 1;
             if let Some(a) = after {
-                sql.push_str(&format!(" AND (published_at >= ?{} OR published_at IS NULL)", idx));
+                sql.push_str(&format!(" AND COALESCE(published_at, fetched_at) >= ?{}", idx));
                 params.push(Box::new(a.to_string()));
                 idx += 1;
             }
             if let Some(b) = before {
-                sql.push_str(&format!(" AND published_at <= ?{}", idx));
+                sql.push_str(&format!(" AND COALESCE(published_at, fetched_at) <= ?{}", idx));
                 params.push(Box::new(b.to_string()));
                 idx += 1;
             }
