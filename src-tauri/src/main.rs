@@ -82,9 +82,15 @@ fn cli_path() -> String {
 }
 
 fn cli(args: &[&str]) -> Result<serde_json::Value, String> {
-    let output = std::process::Command::new(cli_path())
-        .args(args)
-        .output()
+    let mut cmd = std::process::Command::new(cli_path());
+    cmd.args(args);
+    // Hide the console window on Windows
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output()
         .map_err(|e| format!("Failed to run lumen: {}", e))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let envelope: serde_json::Value = serde_json::from_str(&stdout)
