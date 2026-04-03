@@ -94,7 +94,7 @@ enum Commands {
         #[arg(long)]
         markdown: bool,
     },
-    /// Internal: annotate articles with fact-based features (length, has_code, has_steps, etc)
+    /// Internal: annotate articles with fact-based features (length, has_images, structured, etc)
     #[command(name = "_annotate", hide = true)]
     Annotate {
         #[arg(long)]
@@ -162,7 +162,7 @@ enum FolderAction {
     Remove { id: i64 },
     /// List articles in a folder: by ID (manual folders) or by name (cognitive folders)
     Articles {
-        /// Smart view name (unread/long/tutorial/recent) or numeric ID for manual folders
+        /// Smart view name (unread/long/recent) or numeric ID for manual folders
         name: String,
         #[arg(long, default_value_t = 30)]
         count: usize,
@@ -258,7 +258,7 @@ fn describe_commands() -> Value {
             "t": "title",
             "src": "feed name",
             "tldr": "first sentence of content (auto-generated)",
-            "tags": "comma-separated fact-based tags: long, short, medium, structured, has_code, has_steps, has_images, has_links, has_references, link_rich",
+            "tags": "comma-separated fact-based tags: long, short, medium, structured, has_images, has_references, link_rich",
             "wc": "word count of content",
             "r": "is_read (0=unread, 1=read)",
             "s": "is_starred (0=no, 1=yes)",
@@ -592,7 +592,7 @@ fn annotate_articles(db: &Database, force: bool, single_article: Option<i64>) ->
             total_tags += tags_str.matches(',').count() + 1;
             db.set_article_features(
                 a.id, &tags_str, features.word_count, features.heading_count,
-                features.code_block_count, features.external_link_count, features.blockquote_count,
+                features.external_link_count, features.blockquote_count,
             ).ok();
         }
         return Ok((articles.len(), total_tags));
@@ -616,7 +616,7 @@ fn annotate_articles(db: &Database, force: bool, single_article: Option<i64>) ->
         }
 
         let chunk_len = articles.len();
-        let mut updates: Vec<(i64, String, usize, usize, usize, usize, usize)> = Vec::with_capacity(chunk_len);
+        let mut updates: Vec<(i64, String, usize, usize, usize, usize)> = Vec::with_capacity(chunk_len);
 
         for a in &articles {
             let content = a.full_content.as_deref()
@@ -629,7 +629,7 @@ fn annotate_articles(db: &Database, force: bool, single_article: Option<i64>) ->
             total_tags += tags_str.matches(',').count() + 1;
             updates.push((
                 a.id, tags_str, features.word_count, features.heading_count,
-                features.code_block_count, features.external_link_count, features.blockquote_count,
+                features.external_link_count, features.blockquote_count,
             ));
         }
 
@@ -657,7 +657,6 @@ fn annotate_articles(db: &Database, force: bool, single_article: Option<i64>) ->
 const SMART_VIEW_NAMES: &[(&str, &str)] = &[
     ("unread", "Unread articles"),
     ("long", "Long-form articles"),
-    ("tutorial", "Articles with code or steps"),
     ("recent", "Today's articles"),
 ];
 
@@ -1311,7 +1310,6 @@ fn main() -> ExitCode {
                         "tags_assigned": total_tags,
                     }), vec![
                         action("lumen folders articles long", "View long-form articles", json!({})),
-                        action("lumen folders articles tutorial", "View tutorials", json!({})),
                         action("lumen folders articles unread", "View unread", json!({})),
                     ])
                 }
@@ -1386,10 +1384,6 @@ fn main() -> ExitCode {
                     let long_count = db.count_long_form_articles().unwrap_or(0);
                     items.push(json!({"id": null, "name": "long", "type": "smart_view", "description": "Long-form articles (800+ words)", "article_count": long_count}));
 
-                    // "tutorial" — requires multiple code blocks + steps or sufficient length
-                    let tutorial_count = db.count_tutorial_articles().unwrap_or(0);
-                    items.push(json!({"id": null, "name": "tutorial", "type": "smart_view", "description": "Tutorials (2+ code blocks with steps)", "article_count": tutorial_count}));
-
                     // "recent" — today's articles
                     let recent_count = db.search_articles_since("", "24h", 9999, None, true).map(|a| a.len()).unwrap_or(0);
                     items.push(json!({"id": null, "name": "recent", "type": "smart_view", "description": "Today's articles", "article_count": recent_count}));
@@ -1404,7 +1398,6 @@ fn main() -> ExitCode {
                     success("folders", json!({"folders": items, "count": items.len()}), vec![
                         action("lumen folders articles unread", "View unread articles", json!({})),
                         action("lumen folders articles long", "View long-form articles", json!({})),
-                        action("lumen folders articles tutorial", "View tutorials", json!({})),
                         action("lumen folders articles recent", "View today's articles", json!({})),
                         action("lumen folders create <name>", "Create manual folder", json!({})),
                     ])
@@ -1456,7 +1449,6 @@ fn main() -> ExitCode {
                         let result = match name.as_str() {
                             "unread" => db.list_articles(None, true),
                             "long" => db.get_long_form_articles(count),
-                            "tutorial" => db.get_tutorial_articles(count),
                             "recent" => db.search_articles_since("", "24h", count, None, true),
                             _ => unreachable!(),
                         };
@@ -1481,7 +1473,7 @@ fn main() -> ExitCode {
                             Err(e) => error("folders", &format!("{}", e), "Use `lumen folders` to see IDs"),
                         }
                     } else {
-                        error("folders", &format!("Unknown view: {}. Use one of: unread, long, tutorial, recent, or a numeric folder ID", name), "Use `lumen folders` to list available views")
+                        error("folders", &format!("Unknown view: {}. Use one of: unread, long, recent, or a numeric folder ID", name), "Use `lumen folders` to list available views")
                     }
                 }
             }

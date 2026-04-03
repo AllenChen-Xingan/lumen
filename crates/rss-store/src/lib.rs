@@ -153,9 +153,6 @@ impl Database {
             "ALTER TABLE articles ADD COLUMN heading_count INTEGER NOT NULL DEFAULT 0;"
         );
         let _ = self.conn.execute_batch(
-            "ALTER TABLE articles ADD COLUMN code_block_count INTEGER NOT NULL DEFAULT 0;"
-        );
-        let _ = self.conn.execute_batch(
             "ALTER TABLE articles ADD COLUMN external_link_count INTEGER NOT NULL DEFAULT 0;"
         );
         let _ = self.conn.execute_batch(
@@ -166,8 +163,12 @@ impl Database {
         let _ = self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_articles_word_count ON articles(word_count);"
         );
+        // Migration: drop obsolete code_block_count column (no longer used)
         let _ = self.conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_articles_code_block_count ON articles(code_block_count);"
+            "DROP INDEX IF EXISTS idx_articles_code_block_count;"
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE articles DROP COLUMN code_block_count;"
         );
 
         // Migration: feed health monitoring columns
@@ -996,13 +997,12 @@ impl Database {
         tags: &str,
         word_count: usize,
         heading_count: usize,
-        code_block_count: usize,
         external_link_count: usize,
         blockquote_count: usize,
     ) -> Result<bool, rusqlite::Error> {
         let changed = self.conn.execute(
-            "UPDATE articles SET tags = ?1, word_count = ?2, heading_count = ?3, code_block_count = ?4, external_link_count = ?5, blockquote_count = ?6 WHERE id = ?7",
-            rusqlite::params![tags, word_count as i64, heading_count as i64, code_block_count as i64, external_link_count as i64, blockquote_count as i64, article_id],
+            "UPDATE articles SET tags = ?1, word_count = ?2, heading_count = ?3, external_link_count = ?4, blockquote_count = ?5 WHERE id = ?6",
+            rusqlite::params![tags, word_count as i64, heading_count as i64, external_link_count as i64, blockquote_count as i64, article_id],
         )?;
         Ok(changed > 0)
     }
@@ -1045,32 +1045,6 @@ impl Database {
         )
     }
 
-    /// Get tutorial articles: requires 2+ code blocks AND (has_steps with avg item > 50 chars OR sufficient length)
-    /// Falls back to tag intersection for articles not yet re-annotated
-    pub fn get_tutorial_articles(&self, limit: usize) -> Result<Vec<Article>, rusqlite::Error> {
-        let sql = format!(
-            "SELECT id, feed_id, guid, title, url, content, summary, published_at, is_read, is_starred, fetched_at, tldr, full_content, tags
-             FROM articles WHERE
-               (code_block_count >= 2 AND (tags LIKE '%has_steps%' OR word_count >= 500))
-               OR (code_block_count = 0 AND tags LIKE '%has_code%' AND tags LIKE '%has_steps%')
-             ORDER BY published_at DESC LIMIT {}",
-            limit
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let articles = stmt.query_map([], |row| Self::row_to_article(row))?.collect::<Result<Vec<_>, _>>()?;
-        Ok(articles)
-    }
-
-    /// Count tutorial articles
-    pub fn count_tutorial_articles(&self) -> Result<i64, rusqlite::Error> {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM articles WHERE
-               (code_block_count >= 2 AND (tags LIKE '%has_steps%' OR word_count >= 500))
-               OR (code_block_count = 0 AND tags LIKE '%has_code%' AND tags LIKE '%has_steps%')",
-            [],
-            |row| row.get(0),
-        )
-    }
 
     /// Get articles that haven't been classified yet (alias: list_untagged_articles)
     pub fn get_unclassified_articles(&self) -> Result<Vec<Article>, rusqlite::Error> {
@@ -1112,14 +1086,14 @@ impl Database {
     /// Batch update article features within a single transaction
     pub fn batch_set_article_features(
         &self,
-        updates: &[(i64, String, usize, usize, usize, usize, usize)],
+        updates: &[(i64, String, usize, usize, usize, usize)],
     ) -> Result<usize, rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut count = 0;
-        for (article_id, tags, word_count, heading_count, code_block_count, external_link_count, blockquote_count) in updates {
+        for (article_id, tags, word_count, heading_count, external_link_count, blockquote_count) in updates {
             let changed = tx.execute(
-                "UPDATE articles SET tags = ?1, word_count = ?2, heading_count = ?3, code_block_count = ?4, external_link_count = ?5, blockquote_count = ?6 WHERE id = ?7",
-                rusqlite::params![tags, *word_count as i64, *heading_count as i64, *code_block_count as i64, *external_link_count as i64, *blockquote_count as i64, article_id],
+                "UPDATE articles SET tags = ?1, word_count = ?2, heading_count = ?3, external_link_count = ?4, blockquote_count = ?5 WHERE id = ?6",
+                rusqlite::params![tags, *word_count as i64, *heading_count as i64, *external_link_count as i64, *blockquote_count as i64, article_id],
             )?;
             count += changed;
         }
@@ -1176,7 +1150,7 @@ impl Database {
     /// Count articles for each fact-based tag
     pub fn count_all_tags(&self) -> Result<Vec<(String, i64)>, rusqlite::Error> {
         let mut results = Vec::new();
-        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images", "structured", "has_references", "link_rich"] {
+        for tag in &["short", "medium", "long", "has_images", "structured", "has_references", "link_rich"] {
             let count = self.count_articles_by_tag(tag)?;
             if count > 0 {
                 results.push((tag.to_string(), count));
@@ -1198,7 +1172,7 @@ impl Database {
     /// Returns: Vec<(tag, total, read, starred, deep_read)>
     pub fn tag_engagement_stats(&self) -> Result<Vec<(String, i64, i64, i64, i64)>, rusqlite::Error> {
         let mut results = Vec::new();
-        for tag in &["short", "medium", "long", "has_code", "has_steps", "has_images", "structured", "has_references", "link_rich"] {
+        for tag in &["short", "medium", "long", "has_images", "structured", "has_references", "link_rich"] {
             let pattern = format!("%{}%", tag);
             let row: (i64, i64, i64, i64) = self.conn.query_row(
                 "SELECT COUNT(*), SUM(is_read), SUM(is_starred),

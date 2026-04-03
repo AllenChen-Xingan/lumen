@@ -8,14 +8,6 @@ pub struct ArticleFeatures {
     pub length: String,
     /// Word/char count of the text content
     pub word_count: usize,
-    /// Contains code blocks (``` or <code> or <pre>)
-    pub has_code: bool,
-    /// Number of distinct code blocks
-    pub code_block_count: usize,
-    /// Contains numbered/ordered list (step-by-step patterns)
-    pub has_steps: bool,
-    /// Average character length of list items (0 if no list)
-    pub avg_list_item_length: usize,
     /// Contains images (<img> tags)
     pub has_images: bool,
     /// Number of heading tags (h1-h6, or markdown #)
@@ -68,12 +60,6 @@ pub fn detect_features(title: &str, content: &str) -> ArticleFeatures {
     // Word count (split on whitespace + CJK char counting)
     let word_count = count_words(&combined);
 
-    // Code detection + count
-    let code_block_count = count_code_blocks(content);
-    let has_code = code_block_count > 0;
-
-    // Step detection + average list item length
-    let (has_steps, avg_list_item_length) = detect_steps_detailed(content, &text);
 
     // Image detection
     let has_images = content.contains("<img")
@@ -91,10 +77,6 @@ pub fn detect_features(title: &str, content: &str) -> ArticleFeatures {
     ArticleFeatures {
         length,
         word_count,
-        has_code,
-        code_block_count,
-        has_steps,
-        avg_list_item_length,
         has_images,
         heading_count,
         blockquote_count,
@@ -108,12 +90,6 @@ pub fn features_to_tags(features: &ArticleFeatures) -> String {
 
     tags.push(features.length.as_str());
 
-    if features.has_code {
-        tags.push("has_code");
-    }
-    if features.has_steps {
-        tags.push("has_steps");
-    }
     if features.has_images {
         tags.push("has_images");
     }
@@ -172,16 +148,6 @@ fn is_cjk(ch: char) -> bool {
         || (0x3000..=0x303F).contains(&cp) // CJK Punctuation
 }
 
-/// Count code blocks: markdown fences (```) and HTML <code>/<pre> tags
-fn count_code_blocks(html: &str) -> usize {
-    let fence_count = html.matches("```").count() / 2; // pairs of fences
-    let code_tags = count_occurrences(html, "<code");
-    let pre_tags = count_occurrences(html, "<pre");
-    let escaped_code = count_occurrences(html, "&lt;code");
-    let escaped_pre = count_occurrences(html, "&lt;pre");
-    fence_count + code_tags + pre_tags + escaped_code + escaped_pre
-}
-
 /// Count headings: HTML h1-h6 tags
 fn count_headings(html: &str) -> usize {
     let mut count = 0;
@@ -216,67 +182,3 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
 }
 
-/// Detect steps and compute average list item length.
-/// Returns (has_steps, avg_list_item_length).
-fn detect_steps_detailed(html: &str, text: &str) -> (bool, usize) {
-    let mut item_lengths: Vec<usize> = Vec::new();
-
-    // Collect <li> content lengths from HTML
-    // Use lowercase copy for both search and extraction to avoid byte-index mismatch
-    {
-        let lower = html.to_lowercase();
-        let mut search_from = 0;
-        while let Some(start) = lower[search_from..].find("<li") {
-            let abs_start = search_from + start;
-            if let Some(gt) = lower[abs_start..].find('>') {
-                let content_start = abs_start + gt + 1;
-                let content_end = lower[content_start..].find("</li>")
-                    .map(|p| content_start + p)
-                    .unwrap_or(lower.len());
-                let item_text = strip_html(&lower[content_start..content_end]);
-                let len = item_text.trim().chars().count();
-                if len > 0 {
-                    item_lengths.push(len);
-                }
-                search_from = content_end;
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Also check text-based numbered lines
-    let mut numbered_items: Vec<usize> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.len() > 2 {
-            let first_char = trimmed.chars().next().unwrap_or(' ');
-            if first_char.is_ascii_digit()
-                && (trimmed.contains(". ") || trimmed.contains("）") || trimmed.contains(") "))
-            {
-                numbered_items.push(trimmed.chars().count());
-            }
-        }
-    }
-
-    // Use whichever source found more items
-    let items = if item_lengths.len() >= numbered_items.len() {
-        &item_lengths
-    } else {
-        &numbered_items
-    };
-
-    let has_ordered_list = html.contains("<ol");
-    let has_step_keywords = text.contains("步骤") || text.contains("第一步") || text.contains("Step ");
-    let has_numbered = items.len() >= 3;
-
-    let has_steps = has_ordered_list || has_step_keywords || has_numbered;
-
-    let avg_len = if items.is_empty() {
-        0
-    } else {
-        items.iter().sum::<usize>() / items.len()
-    };
-
-    (has_steps, avg_len)
-}
