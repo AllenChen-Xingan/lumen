@@ -11,8 +11,7 @@ Give me a daily briefing of my RSS feeds.
 
 3. **Highlight interesting articles**: Pick articles that are:
    - Long form (wc > 1000) — deep reads
-   - Has code (tags contains "has_code") — technical content
-   - Structured (tags contains "structured" or "has_steps") — tutorials/guides
+   - Structured (tags contains "structured") — well-organized with headings
 
 4. **Fetch top 3-5 for summaries**:
    ```bash

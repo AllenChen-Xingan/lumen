@@ -58,7 +58,7 @@ Filter with jq before fetching full text:
 Pick top 3-5 articles based on:
 - Title/tldr relevance to the intent
 - `wc > 300` (substantial content)
-- `tags` containing useful signals (has_code for technical work, structured for tutorials)
+- `tags` containing useful signals (structured for well-organized content, link_rich for well-sourced content)
 - Diverse `src` (don't return 5 articles from one feed)
 
 ## Step 3: Retrieve as Markdown

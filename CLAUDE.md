@@ -28,7 +28,7 @@ tests/          e2e.sh, a11y-audit.mjs, nvda-checklist.sh
 All logic lives in `rss-cli`. Tauri `main.rs` calls the CLI binary via `std::process::Command` and parses JSON output. No Rust library linking between crates and Tauri.
 
 ### 2. Fact-based annotation, NOT AI classification
-`rss-ner` does deterministic text feature detection (length, has_code, has_steps, has_images). Smart folders are fact-query views (unread/long/tutorial/recent). **Never add "AI guesses user intent" features.** High-order intentionality judgments belong to the user/agent, not the system.
+`rss-ner` does deterministic text feature detection (length, has_images, structured, link_rich). Smart views are interaction-mode views (unread/long/recent) — each must map to a user action, not classify article type. **Never add "AI guesses user intent" features.** High-order intentionality judgments belong to the user/agent, not the system.
 
 ### 3. Implicit feedback only
 `is_read`, `is_starred`, `full_content IS NOT NULL` are the engagement signals. No explicit feedback forms, tag correction UI, or feedback tables. If a feature's primary purpose is collecting feedback, delete it.

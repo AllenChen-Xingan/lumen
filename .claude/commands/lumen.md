@@ -15,7 +15,7 @@ Find relevant articles from my RSS feeds based on current context.
    ```
    Use `--after`/`--before`/`--on` for specific dates. Use `jq` to filter: `select(.r==0 and .wc > 300)`.
 
-4. **Pick top 3-5** articles based on: title/tldr relevance, word count > 300, diverse sources, useful tags (has_code, structured).
+4. **Pick top 3-5** articles based on: title/tldr relevance, word count > 300, diverse sources, useful tags (structured, link_rich).
 
 5. **Fetch markdown**:
    ```bash
